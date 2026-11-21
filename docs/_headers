@@ -1,0 +1,11 @@
+# The page is one self-contained document: inline styles and scripts, fonts
+# from assets.21no.de, no requests anywhere else, and it is never framed.
+/*
+  Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://assets.21no.de; font-src https://assets.21no.de; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), interest-cohort=()
+
+/og.png
+  Cache-Control: public, max-age=86400, must-revalidate

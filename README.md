@@ -500,9 +500,28 @@ src/main.rs       entry point (_start), self-relocation, dispatch on argv[0], al
 tools/mkrootfs.sh assembles the image's root filesystem
 test/e2e.sh       test runner; test/suite.sh holds the checks, test/cases/ the shell scripts
 test/probe.rs     test helper that issues the system calls the filter must refuse
-docs/             the site at kcos.21no.de: index.html plus share image, robots.txt, sitemap, CNAME
+docs/             the site at kcos.21no.de: index.html, 404.html, share image, _headers,
+                  robots.txt, sitemap.xml, llms.txt
+wrangler.jsonc    Cloudflare configuration that serves docs/
 tools/update-docs.sh  re-embeds the built binary into docs/index.html; run it after a rebuild
 ```
+
+## The site
+
+`docs/` is the landing page at <https://kcos.21no.de>, served by Cloudflare
+Workers static assets as configured in `wrangler.jsonc`.
+
+```sh
+make site-preview   # npx wrangler dev: serve docs/ locally, headers included
+make site-deploy    # npx wrangler deploy: publish and attach kcos.21no.de
+```
+
+- `docs/_headers` sets the Content-Security-Policy and the other response
+  headers. The page makes no request outside its own origin except for the
+  fonts on `assets.21no.de`.
+- Unknown paths get `docs/404.html` with status 404.
+- After rebuilding the image, run `tools/update-docs.sh` before deploying,
+  so the page embeds the binary you built.
 
 ## License
 

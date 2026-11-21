@@ -1,0 +1,43 @@
+# kContainerOS
+
+> A zero-dependency, Rust-based mini OS userland for ARM64 containers. One static binary with no libc, no std and no crates is PID 1, a small shell and the core utilities. Init locks the container down before the command starts.
+
+- Site: https://kcos.21no.de/
+- Source and README: https://github.com/BackendStack21/kcontaineros
+- Licence: MIT, copyright 21no.de
+- Platform: linux/arm64 only
+
+## What it is
+
+- `/sbin/init`: PID 1. Forwards signals to the command, reaps zombies, exits with the command's status.
+- `/bin/sh`: a small shell for Dockerfile `RUN`/`CMD` and simple scripts. No `if`, loops, functions, globbing, `$(...)` or here-documents; a script that uses them stops with a syntax error before anything runs.
+- Utilities: cat chmod chown cp echo env false kill ln ls mkdir mv ps pwd rm sleep touch true uname.
+- A sealed build target (`--target sealed`) contains init only: no shell, no utilities, no writable directory.
+
+## The lockdown
+
+Applied by init to itself before it starts the command, enforced by the kernel, inherited by every process:
+
+- `no_new_privs`: setuid binaries and file capabilities grant nothing.
+- No capabilities, even under `--privileged`.
+- Landlock: programs execute only from `/bin`, `/sbin`, `/usr` and directories named in `KCOS_EXEC`, and those cannot be written to. A program written at run time does not run.
+- seccomp filter: `ptrace`, new namespaces, mounts, `bpf`, `io_uring`, `memfd_create` and similar are refused.
+- The image runs as `nobody` (65534) and its files are read-only.
+
+## What it does not do
+
+- It is not a guarantee against kernel bugs.
+- It does not limit the network or what can be read; set those with the container runtime.
+- Binaries must be statically linked. There is no package manager.
+- `docker exec`, `--entrypoint` and Dockerfile `RUN` steps start outside init and are not under the Landlock rules or the capability drop.
+- Not tested on Kubernetes, with user namespaces, or with any AI agent framework.
+
+## Use
+
+```dockerfile
+FROM kcontaineros
+COPY my-server /usr/local/bin/my-server
+CMD ["my-server"]
+```
+
+The README has the full details: security notes, a section on containing AI agent tool servers, common questions (including how to get a writable directory), the supported-features table and a comparison with Alpine.

@@ -3,3 +3,6 @@ target/
 examples/
 test/
 docs/
+.wrangler
+node_modules
+wrangler.jsonc
