@@ -1,0 +1,20 @@
+a b|$X|a b
+single $X "q"
+a b $X back\slash q"q
+
+premidpost
+a ba b
+:: :: :def: :a b: ::
+lone $ dollar $ end
+1
+line continued
+dq line continued
+
+a#b
+multi
+line
+<spaced><out>
+midword
+same-fd
+trailing
+[rc 0]

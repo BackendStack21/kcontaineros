@@ -1,0 +1,17 @@
+3|a1|a 2|c3|[]
+<a1><a 2><c3>
+<a1><a><2><c3>
+<a1 a 2 c3>
+<a1><a><2><c3>
+<prea1><a 2><c3post>
+<a><2>
+2|a 2
+0|[]
+<x>
+<dflt>
+sh: shift: cannot shift that many
+rc=1
+sh: shift: cannot shift that many
+rc=1
+1
+[rc 0]

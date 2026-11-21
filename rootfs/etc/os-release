@@ -1,0 +1,5 @@
+NAME="kContainerOS"
+ID=kcontaineros
+VERSION_ID=0.1.0
+PRETTY_NAME="kContainerOS 0.1.0"
+HOME_URL="https://kcos.21no.de"

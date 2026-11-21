@@ -1,0 +1,28 @@
+[package]
+name = "kcontaineros"
+version = "0.1.0"
+edition = "2021"
+description = "A zero-dependency, Rust-based mini OS userland for containers (ARM64)"
+license = "MIT"
+authors = ["21no.de"]
+repository = "https://github.com/BackendStack21/kcontaineros"
+homepage = "https://kcos.21no.de"
+
+# No [dependencies]: only `core` and `alloc` from the Rust distribution.
+
+[features]
+default = ["tools"]
+# The shell and the utilities. Without it the binary is PID 1 only.
+tools = []
+# Instrumented std build, used only by `make coverage`. Never shipped.
+cov = []
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+panic = "abort"

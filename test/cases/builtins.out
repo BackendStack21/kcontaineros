@@ -1,0 +1,27 @@
+/tmp
+/root
+/etc
+/
+sh: cd: /nonexistent: no such file or directory
+rc=1
+2
+changed
+[]
+prefix: v
+after prefix: []
+builtin prefix persists: kept
++ echo traced a b c d e f g
+traced a b c d e f g
++ K=t true
++ set +x
+sh: set: only -e and -x are supported
+rc=2
+sh: unsupported option: -z (only -e and -x)
+rc=2
+builtin-fallback
+nested-fallback
+sh: nope: not found
+rc=127
+after-empty-exec
+sh: nope-exec: not found
+[rc 127]

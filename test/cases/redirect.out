@@ -1,0 +1,37 @@
+one
+two
+three
+err-to-out
+sh: nope-cmd: not found
+sh: nope-cmd: not found
+to-stderr
+rc=1
+cat: -: bad file descriptor
+rc=1
+sh: /nonexistent/dir/f: no such file or directory
+rc=1
+sh: /nonexistent: no such file or directory
+rc=1
+sh: nope: bad file descriptor
+rc=1
+sh: 9: bad file descriptor
+rc=1
+fd3
+created
+also-created
+-rw-r--r-- 0 0 0 f
+rc=1
+sh: cd: /nonexistent: no such file or directory
+sh: /nonexistent/x: no such file or directory
+rc=1
+sh: 7: bad file descriptor
+rc=1
+via-variable
+sh: ambiguous redirect: the target is empty
+rc=1
+descriptors intact
+five
+five
+into-f6
+sh: nope-in-f6: not found
+[rc 0]

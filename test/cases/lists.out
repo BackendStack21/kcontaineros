@@ -1,0 +1,23 @@
+and-yes
+or-yes
+left-assoc-1
+left-assoc-2
+status after skipped: 0
+rc=3
+rc=44
+rc=1
+a
+b
+sh: nope-command: not found
+rc=127
+sh: /nope/command: no such file or directory
+rc=127
+sh: /etc/passwd: permission denied
+rc=126
+waited
+x
+pipe rc=0
+pipe rc=1
+piped
+still here: 0
+[rc 9]

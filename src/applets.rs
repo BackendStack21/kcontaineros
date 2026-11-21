@@ -1,0 +1,788 @@
+//! Core utilities (cat, ls, cp, ...) built on raw syscalls.
+
+use crate::sys;
+use crate::util::*;
+use alloc::vec::Vec;
+
+pub type Applet = fn(args: &[Vec<u8>], env: &[Vec<u8>]) -> i32;
+
+pub const LIST: &[(&[u8], Applet)] = &[
+    (b"cat", cat),
+    (b"chmod", chmod),
+    (b"chown", chown),
+    (b"cp", cp),
+    (b"echo", echo),
+    (b"env", env),
+    (b"false", false_),
+    (b"kill", kill),
+    (b"ln", ln),
+    (b"ls", ls),
+    (b"mkdir", mkdir),
+    (b"mv", mv),
+    (b"ps", ps),
+    (b"pwd", pwd),
+    (b"rm", rm),
+    (b"sleep", sleep),
+    (b"touch", touch),
+    (b"true", true_),
+    (b"uname", uname),
+];
+
+/// Run the applet named by `args[0]`, or None if there is no such applet.
+/// An applet that could not write its output fails, whatever it returned.
+pub fn run(args: &[Vec<u8>], env: &[Vec<u8>]) -> Option<i32> {
+    let applet = LIST.iter().find(|(n, _)| *n == &args[0][..])?.1;
+    let code = applet(args, env);
+    Some(if code == 0 && output_failed() { 1 } else { code })
+}
+
+// ---------------------------------------------------------------- helpers
+
+const S_IFMT: u32 = 0o170000;
+const S_IFCHR: u32 = 0o020000;
+const S_IFDIR: u32 = 0o040000;
+const S_IFREG: u32 = 0o100000;
+const S_IFLNK: u32 = 0o120000;
+
+/// Print `name: operand: <errstr>` to stderr and return exit status 1.
+fn fail(name: &[u8], op: &[u8], e: isize) -> i32 {
+    eprint(&[name, b": ", op, b": ", errstr(e), b"\n"]);
+    1
+}
+
+/// Parse leading `-xyz` option clusters (`--` ends them). Returns the flag
+/// characters seen and the index of the first operand.
+fn flags(name: &[u8], a: &[Vec<u8>], allowed: &[u8]) -> Option<(Vec<u8>, usize)> {
+    let mut f = Vec::new();
+    let mut i = 1;
+    while i < a.len() {
+        let s = &a[i][..];
+        if s == b"--" {
+            i += 1;
+            break;
+        }
+        if s.len() < 2 || s[0] != b'-' {
+            break;
+        }
+        for &c in &s[1..] {
+            if !allowed.contains(&c) {
+                eprint(&[name, b": invalid option: ", s, b"\n"]);
+                return None;
+            }
+            f.push(c);
+        }
+        i += 1;
+    }
+    Some((f, i))
+}
+
+/// The index of the first operand for applets that take no options: only a
+/// leading `--` is skipped, so a file named `-x` is just a file.
+fn operands(a: &[Vec<u8>]) -> usize {
+    if a.len() > 1 && &a[1][..] == b"--" {
+        2
+    } else {
+        1
+    }
+}
+
+struct Stat {
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    size: u64,
+    /// (device major, device minor, inode): identifies the file itself
+    id: (u32, u32, u64),
+}
+
+/// Describe the file at `path`, or the open descriptor `fd` if there is one.
+fn stat_of(path: &[u8], nofollow: bool, fd: Option<i32>) -> Result<Stat, isize> {
+    let mut b = [0u8; 256];
+    let r = match fd {
+        Some(fd) => sys::fstatx(fd, &mut b),
+        None => sys::statx(cz(path).as_ptr(), nofollow, &mut b),
+    };
+    if r < 0 {
+        return Err(r);
+    }
+    let u32_at = |o: usize| u32::from_ne_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+    let u64_at = |o: usize| (u32_at(o) as u64) | (u32_at(o + 4) as u64) << 32;
+    Ok(Stat {
+        mode: u32_at(28) & 0xffff,
+        uid: u32_at(20),
+        gid: u32_at(24),
+        size: u64_at(40),
+        id: (u32_at(136), u32_at(140), u64_at(32)),
+    })
+}
+
+fn stat(path: &[u8], nofollow: bool) -> Result<Stat, isize> {
+    stat_of(path, nofollow, None)
+}
+
+fn is_dir(path: &[u8]) -> bool {
+    matches!(stat(path, false), Ok(s) if s.mode & S_IFMT == S_IFDIR)
+}
+
+// ------------------------------------------------------------------ cat
+
+/// Copy `from` to `to` until end of file. Returns 0 or a negative errno,
+/// and whether it was the writing that failed.
+fn pump_between(from: i32, to: i32) -> (isize, bool) {
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = sys::read(from, &mut buf);
+        if n <= 0 {
+            return (n, false);
+        }
+        if !write_all(to, &buf[..n as usize]) {
+            return (-5, true);
+        }
+    }
+}
+
+fn pump(from: i32, to: i32) -> isize {
+    pump_between(from, to).0
+}
+
+fn cat(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    let stdin = [b"-".to_vec()];
+    let first = operands(a);
+    let files: &[Vec<u8>] = if first < a.len() { &a[first..] } else { &stdin };
+    let mut rc = 0;
+    for f in files {
+        let r = if &f[..] == b"-" {
+            pump(0, 1)
+        } else {
+            let fd = sys::open(cz(f).as_ptr(), sys::O_RDONLY, 0);
+            if fd >= 0 {
+                let r = pump(fd as i32, 1);
+                sys::close(fd as i32);
+                r
+            } else {
+                fd
+            }
+        };
+        if r < 0 {
+            rc = fail(b"cat", f, r);
+        }
+    }
+    rc
+}
+
+// ---------------------------------------------------------------- chmod
+
+fn chmod(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    let first = operands(a);
+    if a.len() < first + 2 {
+        eprint(&[b"chmod: usage: chmod OCTAL FILE...\n"]);
+        return 1;
+    }
+    let spec = &a[first];
+    if spec.is_empty() || spec.len() > 4 || spec.iter().any(|c| !(b'0'..=b'7').contains(c)) {
+        eprint(&[b"chmod: invalid mode: ", spec, b"\n"]);
+        return 1;
+    }
+    let mode = spec.iter().fold(0, |m, &c| m * 8 + (c - b'0') as usize);
+    let mut rc = 0;
+    for f in &a[first + 1..] {
+        let r = sys::chmod(cz(f).as_ptr(), mode);
+        if r < 0 {
+            rc = fail(b"chmod", f, r);
+        }
+    }
+    rc
+}
+
+// ---------------------------------------------------------------- chown
+
+/// chown UID[:GID] FILE...   Numeric IDs only: there is no user database
+/// worth consulting in an image with two accounts.
+fn chown(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    let first = operands(a);
+    if a.len() < first + 2 {
+        eprint(&[b"chown: usage: chown UID[:GID] FILE...\n"]);
+        return 1;
+    }
+    let spec = &a[first];
+    let (user, group) = match spec.iter().position(|&c| c == b':') {
+        Some(i) => (&spec[..i], Some(&spec[i + 1..])),
+        None => (&spec[..], None),
+    };
+    let id = |s: &[u8]| parse_u64(s).filter(|&n| n < u32::MAX as u64).map(|n| n as u32);
+    let (Some(uid), Some(gid)) = (id(user), group.map_or(Some(u32::MAX), id)) else {
+        eprint(&[b"chown: invalid owner: ", spec, b"\n"]);
+        return 1;
+    };
+    let mut rc = 0;
+    for f in &a[first + 1..] {
+        let r = sys::chown(cz(f).as_ptr(), uid, gid);
+        if r < 0 {
+            rc = fail(b"chown", f, r);
+        }
+    }
+    rc
+}
+
+// ------------------------------------------------------------- cp and mv
+
+/// What went wrong in a copy or move, and whether the destination (rather
+/// than the source) is the path to name in the message.
+type Failure = (isize, bool);
+
+fn copy_file(src: &[u8], dst: &[u8]) -> Result<(), Failure> {
+    // Open first and inspect the descriptor, so the file checked is the
+    // file copied. O_NONBLOCK keeps a FIFO from blocking the open.
+    let fd = sys::open(cz(src).as_ptr(), sys::O_RDONLY | sys::O_NONBLOCK, 0);
+    if fd < 0 {
+        return Err((fd, false));
+    }
+    let fd = fd as i32;
+    let res = (|| {
+        let s = stat_of(b"", false, Some(fd)).map_err(|e| (e, false))?;
+        match s.mode & S_IFMT {
+            S_IFREG | S_IFCHR => {} // a device too: `cp /dev/null file`
+            S_IFDIR => return Err((sys::EISDIR, false)),
+            _ => return Err((-22, false)),
+        }
+        if matches!(stat(dst, false), Ok(d) if d.id == s.id) {
+            return Err((ESAMEFILE, false)); // opening it would truncate the source
+        }
+        // Permission bits only: a copy never inherits setuid, setgid or sticky.
+        let flags = sys::O_WRONLY | sys::O_CREAT | sys::O_TRUNC;
+        let out = sys::open(cz(dst).as_ptr(), flags, (s.mode & 0o777) as usize);
+        if out < 0 {
+            return Err((out, true));
+        }
+        let (r, writing) = pump_between(fd, out as i32);
+        sys::close(out as i32);
+        if r < 0 {
+            return Err((r, writing));
+        }
+        Ok(())
+    })();
+    sys::close(fd);
+    res
+}
+
+fn move_file(src: &[u8], dst: &[u8]) -> Result<(), Failure> {
+    let r = sys::rename(cz(src).as_ptr(), cz(dst).as_ptr());
+    if r < 0 {
+        return Err((r, false));
+    }
+    Ok(())
+}
+
+/// Shared driver for `cp` and `mv`: SRC... DST, into DST if it is a directory.
+fn transfer(name: &[u8], a: &[Vec<u8>], op: fn(&[u8], &[u8]) -> Result<(), Failure>) -> i32 {
+    let a = &a[operands(a)..];
+    let Some((dst, sources)) = a.split_last().filter(|(_, sources)| !sources.is_empty()) else {
+        eprint(&[name, b": usage: ", name, b" SRC... DST\n"]);
+        return 1;
+    };
+    let dir = is_dir(dst);
+    if sources.len() > 1 && !dir {
+        return fail(name, dst, sys::ENOTDIR);
+    }
+    let mut rc = 0;
+    for s in sources {
+        let target = if dir { join(dst, basename(s)) } else { dst.clone() };
+        if let Err((e, at_destination)) = op(s, &target) {
+            rc = fail(name, if at_destination { &target } else { s }, e);
+        }
+    }
+    rc
+}
+
+fn cp(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    transfer(b"cp", a, copy_file)
+}
+
+fn mv(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    transfer(b"mv", a, move_file)
+}
+
+// ------------------------------------------------- echo, env, true, false
+
+fn echo(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    let (newline, start) = if a.len() > 1 && &a[1][..] == b"-n" { (false, 2) } else { (true, 1) };
+    let mut o = Out::new(1);
+    for (i, s) in a.iter().skip(start).enumerate() {
+        if i > 0 {
+            o.s(b" ");
+        }
+        o.s(s);
+    }
+    if newline {
+        o.s(b"\n");
+    }
+    0
+}
+
+/// env [-i] [NAME=VALUE]... [COMMAND [ARGS]...]
+fn env(a: &[Vec<u8>], e: &[Vec<u8>]) -> i32 {
+    let mut vars: Vec<Vec<u8>> = e.to_vec();
+    let mut i = 1;
+    if a.get(1).is_some_and(|s| &s[..] == b"-i") {
+        vars.clear();
+        i = 2;
+    }
+    while let Some(eq) = a.get(i).and_then(|s| s.iter().position(|&c| c == b'=')).filter(|&p| p > 0) {
+        vars.retain(|v| !v.starts_with(&a[i][..=eq]));
+        vars.push(a[i].clone());
+        i += 1;
+    }
+    if i < a.len() {
+        let err = exec(&a[i..], &vars);
+        fail(b"env", &a[i], err);
+        return if err == sys::ENOENT { 127 } else { 126 };
+    }
+    let mut o = Out::new(1);
+    for v in &vars {
+        o.s(v);
+        o.s(b"\n");
+    }
+    0
+}
+
+fn false_(_a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    1
+}
+
+fn true_(_a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    0
+}
+
+// ----------------------------------------------------------------- kill
+
+const SIGNALS: &[(&[u8], u64)] = &[
+    (b"HUP", 1),
+    (b"INT", 2),
+    (b"QUIT", 3),
+    (b"KILL", 9),
+    (b"USR1", 10),
+    (b"USR2", 12),
+    (b"TERM", 15),
+    (b"CONT", 18),
+    (b"STOP", 19),
+];
+
+fn kill(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    let mut sig = 15;
+    let mut i = 1;
+    if a.len() > 1 && a[1].len() > 1 && a[1][0] == b'-' && &a[1][..] != b"--" {
+        let s = &a[1][1..];
+        let s = s.strip_prefix(b"SIG").unwrap_or(s);
+        let named = SIGNALS.iter().find(|(n, _)| *n == s).map(|&(_, v)| v);
+        sig = match named.or_else(|| parse_u64(s)) {
+            Some(n) if n <= 64 => n,
+            _ => {
+                eprint(&[b"kill: invalid signal: ", &a[1], b"\n"]);
+                return 1;
+            }
+        };
+        i = 2;
+    }
+    if a.get(i).is_some_and(|s| &s[..] == b"--") {
+        i += 1;
+    }
+    if i >= a.len() {
+        eprint(&[b"kill: usage: kill [-SIGNAL] PID...\n"]);
+        return 1;
+    }
+    let mut rc = 0;
+    for p in &a[i..] {
+        // Only real process IDs: 0, -1 and other "everything" forms are
+        // refused, as is anything that would wrap around a 32-bit pid_t.
+        match parse_u64(p) {
+            Some(pid) if (1..=i32::MAX as u64).contains(&pid) => {
+                let r = sys::kill(pid as isize, sig as usize);
+                if r < 0 {
+                    rc = fail(b"kill", p, r);
+                }
+            }
+            _ => {
+                eprint(&[b"kill: invalid pid: ", p, b"\n"]);
+                rc = 1;
+            }
+        }
+    }
+    rc
+}
+
+// ------------------------------------------------------------------- ln
+
+fn ln(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    let Some((f, i)) = flags(b"ln", a, b"s") else {
+        return 1;
+    };
+    if a.len() != i + 2 {
+        eprint(&[b"ln: usage: ln [-s] TARGET LINK\n"]);
+        return 1;
+    }
+    let (t, l) = (cz(&a[i]), cz(&a[i + 1]));
+    let r = if f.contains(&b's') {
+        sys::symlink(t.as_ptr(), l.as_ptr())
+    } else {
+        sys::link(t.as_ptr(), l.as_ptr())
+    };
+    if r < 0 {
+        return fail(b"ln", &a[i + 1], r);
+    }
+    0
+}
+
+// ------------------------------------------------------------------- ls
+
+struct Ls {
+    out: Out,
+    long: bool,
+    /// Replace control characters in names: on when stdout is a terminal.
+    safe: bool,
+}
+
+impl Ls {
+    fn name(&mut self, n: &[u8]) {
+        if self.safe {
+            self.out.safe(n);
+        } else {
+            self.out.s(n);
+        }
+    }
+
+    /// Print one entry; `full` is the path to stat, `name` what to show.
+    fn entry(&mut self, full: &[u8], name: &[u8]) -> i32 {
+        if !self.long {
+            self.name(name);
+            self.out.s(b"\n");
+            return 0;
+        }
+        let st = match stat(full, true) {
+            Ok(s) => s,
+            Err(e) => {
+                self.out.flush();
+                return fail(b"ls", full, e);
+            }
+        };
+        let m = st.mode;
+        let mut s = [b'-'; 10];
+        // File type from the top four mode bits.
+        s[0] = b"?pc?d?b?-?l?s???"[(m >> 12) as usize & 15];
+        for k in 0..9 {
+            if m & (0o400 >> k) != 0 {
+                s[1 + k] = b"rwx"[k % 3];
+            }
+        }
+        // setuid, setgid and sticky replace the matching execute position.
+        for (bit, pos, set) in [(0o4000, 3, b's'), (0o2000, 6, b's'), (0o1000, 9, b't')] {
+            if m & bit != 0 {
+                s[pos] = if s[pos] == b'x' { set } else { set.to_ascii_uppercase() };
+            }
+        }
+        self.out.s(&s);
+        for n in [st.uid as u64, st.gid as u64, st.size] {
+            self.out.s(b" ");
+            self.out.num(n);
+        }
+        self.out.s(b" ");
+        self.name(name);
+        if m & S_IFMT == S_IFLNK {
+            let mut buf = [0u8; 4096];
+            let r = sys::readlink(cz(full).as_ptr(), &mut buf);
+            self.out.s(b" -> ");
+            self.name(&buf[..r.max(0) as usize]);
+        }
+        self.out.s(b"\n");
+        0
+    }
+}
+
+fn ls(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    let Some((f, i)) = flags(b"ls", a, b"la") else {
+        return 1;
+    };
+    let all = f.contains(&b'a');
+    let mut ls = Ls { out: Out::new(1), long: f.contains(&b'l'), safe: sys::isatty(1) };
+    let dot = [b".".to_vec()];
+    let paths: &[Vec<u8>] = if i < a.len() { &a[i..] } else { &dot };
+    let mut rc = 0;
+    let mut listed = false;
+    for p in paths {
+        match read_dir(p) {
+            Ok(mut entries) => {
+                // Several operands: a header for each, a blank line between.
+                if paths.len() > 1 {
+                    if listed {
+                        ls.out.s(b"\n");
+                    }
+                    ls.name(p);
+                    ls.out.s(b":\n");
+                }
+                listed = true;
+                entries.sort_unstable();
+                for n in &entries {
+                    if all || n[0] != b'.' {
+                        rc |= ls.entry(&join(p, n), n);
+                    }
+                }
+            }
+            // A file, or a symlink that leads nowhere: show the thing itself.
+            Err(e) if e == sys::ENOTDIR || stat(p, true).is_ok_and(|s| s.mode & S_IFMT == S_IFLNK) => {
+                rc |= ls.entry(p, p)
+            }
+            Err(e) => {
+                ls.out.flush();
+                rc = fail(b"ls", p, e);
+            }
+        }
+    }
+    rc
+}
+
+// ---------------------------------------------------------------- mkdir
+
+fn mkdir(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    let Some((f, i)) = flags(b"mkdir", a, b"p") else {
+        return 1;
+    };
+    if i >= a.len() {
+        eprint(&[b"mkdir: missing operand\n"]);
+        return 1;
+    }
+    let parents = f.contains(&b'p');
+    let mut rc = 0;
+    for d in &a[i..] {
+        // With -p, create each prefix that ends at a slash, then the whole.
+        let mut ends: Vec<usize> = Vec::new();
+        if parents {
+            ends.extend((1..d.len()).filter(|&k| d[k] == b'/'));
+        }
+        ends.push(d.len());
+        for &k in &ends {
+            let r = sys::mkdir(cz(&d[..k]).as_ptr(), 0o777);
+            if r < 0 && !(parents && r == sys::EEXIST && is_dir(&d[..k])) {
+                rc = fail(b"mkdir", &d[..k], r);
+                break;
+            }
+        }
+    }
+    rc
+}
+
+// ------------------------------------------------------------------- ps
+
+fn ps(_a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    let entries = match read_dir(b"/proc") {
+        Ok(x) => x,
+        Err(e) => return fail(b"ps", b"/proc", e),
+    };
+    let mut pids: Vec<u64> = entries.iter().filter_map(|n| parse_u64(n)).collect();
+    pids.sort_unstable();
+    let mut o = Out::new(1);
+    o.s(b"  PID S COMMAND\n");
+    for pid in pids {
+        let mut tmp = [0u8; 20];
+        let dir = join(b"/proc", fmt_u64(pid, &mut tmp));
+        // A process can vanish between the listing and the read.
+        let Ok(st) = read_file(&join(&dir, b"stat")) else { continue };
+        // "pid (comm) state ...": comm may itself contain parentheses, so
+        // take the first "(" and the last ")".
+        let open = st.iter().position(|&c| c == b'(').unwrap_or(0);
+        let close = st.iter().rposition(|&c| c == b')').unwrap_or(0).max(open);
+        let state = st.get(close + 2).copied().unwrap_or(b'?');
+        let mut cmd = read_file(&join(&dir, b"cmdline")).unwrap_or_default();
+        while cmd.last() == Some(&0) {
+            cmd.pop();
+        }
+        for c in cmd.iter_mut().filter(|c| **c == 0) {
+            *c = b' ';
+        }
+        o.num_w(pid, 5);
+        o.s(b" ");
+        o.safe(&[state]);
+        o.s(b" ");
+        // Names and arguments are chosen by the process: never print them raw.
+        if cmd.is_empty() {
+            o.s(b"[");
+            o.safe(&st[(open + 1).min(close)..close]);
+            o.s(b"]");
+        } else {
+            o.safe(&cmd);
+        }
+        o.s(b"\n");
+    }
+    0
+}
+
+// ------------------------------------------------------------------ pwd
+
+fn pwd(_a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    let mut buf = [0u8; 4096];
+    let r = sys::getcwd(&mut buf);
+    if r < 0 {
+        return fail(b"pwd", b".", r);
+    }
+    let mut o = Out::new(1);
+    o.s(&buf[..r as usize - 1]);
+    o.s(b"\n");
+    0
+}
+
+// ------------------------------------------------------------------- rm
+
+/// How many directories deep `rm -r` will go. Each level holds a
+/// descriptor and a stack frame, so this bounds both.
+const RM_MAX_DEPTH: usize = 4096;
+
+struct Rm {
+    rec: bool,
+    force: bool,
+    /// Full path of what is being removed, for messages only.
+    shown: Vec<u8>,
+}
+
+impl Rm {
+    /// Remove `name` inside the directory `dirfd`. Recursion goes through
+    /// directory descriptors opened without following symlinks, so the walk
+    /// cannot be redirected outside the tree and has no path-length limit.
+    fn at(&mut self, dirfd: i32, name: &[u8], depth: usize) -> i32 {
+        let nz = cz(name);
+        let r = sys::unlinkat(dirfd, nz.as_ptr(), false);
+        if r >= 0 || (r == sys::ENOENT && self.force) {
+            return 0;
+        }
+        if r != sys::EISDIR || !self.rec {
+            return fail(b"rm", &self.shown, r);
+        }
+        if depth == RM_MAX_DEPTH {
+            return fail(b"rm", &self.shown, ETOODEEP);
+        }
+        let flags = sys::O_RDONLY | sys::O_DIRECTORY | sys::O_NOFOLLOW;
+        let fd = sys::openat(dirfd, nz.as_ptr(), flags, 0);
+        if fd < 0 {
+            return fail(b"rm", &self.shown, fd);
+        }
+        let mut rc = 0;
+        let len = self.shown.len();
+        for n in read_dir_fd(fd as i32) {
+            self.shown.push(b'/');
+            self.shown.extend_from_slice(&n);
+            rc |= self.at(fd as i32, &n, depth + 1);
+            self.shown.truncate(len);
+        }
+        sys::close(fd as i32);
+        let r = sys::unlinkat(dirfd, nz.as_ptr(), true);
+        if r < 0 {
+            rc = fail(b"rm", &self.shown, r);
+        }
+        rc
+    }
+}
+
+fn rm(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    let Some((f, i)) = flags(b"rm", a, b"rf") else {
+        return 1;
+    };
+    let (rec, force) = (f.contains(&b'r'), f.contains(&b'f'));
+    if i >= a.len() && !force {
+        eprint(&[b"rm: missing operand\n"]);
+        return 1;
+    }
+    let mut rc = 0;
+    for p in &a[i..] {
+        // "/", "." and ".." (with any trailing slashes) are never removed.
+        let trimmed = match p.iter().rposition(|&c| c != b'/') {
+            Some(last) => &p[..=last],
+            None => &p[..0],
+        };
+        if matches!(basename(trimmed), b"" | b"." | b"..") {
+            eprint(&[b"rm: refusing to remove ", p, b"\n"]);
+            rc = 1;
+            continue;
+        }
+        let mut rm = Rm { rec, force, shown: p.clone() };
+        rc |= rm.at(sys::AT_FDCWD, p, 0);
+    }
+    rc
+}
+
+// ---------------------------------------------------------------- sleep
+
+fn sleep(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    let s: &[u8] = a.get(1).map_or(b"", |s| &s[..]);
+    let (whole, frac) = match s.iter().position(|&c| c == b'.') {
+        Some(i) => (&s[..i], &s[i + 1..]),
+        None => (s, &s[..0]),
+    };
+    let sec = if whole.is_empty() && !frac.is_empty() { Some(0) } else { parse_u64(whole) };
+    let (Some(sec), true) = (sec, frac.iter().all(u8::is_ascii_digit)) else {
+        eprint(&[b"sleep: invalid time interval: ", s, b"\n"]);
+        return 1;
+    };
+    // Nanoseconds from up to nine fractional digits.
+    let ns = (0..9).fold(0, |ns, k| ns * 10 + frac.get(k).map_or(0, |&c| (c - b'0') as u64));
+    let r = sys::nanosleep(sec, ns);
+    if r < 0 {
+        return fail(b"sleep", s, r);
+    }
+    0
+}
+
+// ---------------------------------------------------------------- touch
+
+fn touch(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    let first = operands(a);
+    if first >= a.len() {
+        eprint(&[b"touch: missing file operand\n"]);
+        return 1;
+    }
+    let mut rc = 0;
+    for f in &a[first..] {
+        let p = cz(f);
+        // Update the times of whatever is there (a directory too); only
+        // create a file when nothing is.
+        let mut r = sys::utimes_now(p.as_ptr());
+        if r == sys::ENOENT {
+            r = sys::open(p.as_ptr(), sys::O_WRONLY | sys::O_CREAT, 0o666);
+            if r >= 0 {
+                sys::close(r as i32);
+            }
+        }
+        if r < 0 {
+            rc = fail(b"touch", f, r);
+        }
+    }
+    rc
+}
+
+// --------------------------------------------------------------- uname
+
+fn uname(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    let mut b = [0u8; 390];
+    sys::uname(&mut b);
+    // struct utsname: sysname, nodename, release, version, machine.
+    let field = |i: usize| {
+        let f = &b[i * 65..(i + 1) * 65];
+        &f[..f.iter().position(|&c| c == 0).unwrap_or(f.len())]
+    };
+    let wanted: &[usize] = match a.get(1).map(|s| &s[..]) {
+        Some(b"-a") => &[0, 1, 2, 3, 4],
+        Some(b"-n") => &[1],
+        Some(b"-r") => &[2],
+        Some(b"-m") => &[4],
+        Some(b"-s") | None => &[0],
+        Some(other) => {
+            eprint(&[b"uname: invalid option: ", other, b"\n"]);
+            return 1;
+        }
+    };
+    let mut o = Out::new(1);
+    for (k, &i) in wanted.iter().enumerate() {
+        if k > 0 {
+            o.s(b" ");
+        }
+        o.s(field(i));
+    }
+    o.s(b"\n");
+    0
+}

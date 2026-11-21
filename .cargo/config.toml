@@ -1,0 +1,17 @@
+# kContainerOS is a freestanding Linux userland binary: no libc, no std.
+# It is built for the bare `aarch64-unknown-none` target and talks to the
+# kernel through raw syscalls. The result is a static PIE: the kernel loads
+# it at a random address and `kcos_start` relocates it.
+[build]
+target = "aarch64-unknown-none"
+
+[target.aarch64-unknown-none]
+rustflags = [
+    "-C", "relocation-model=pie",
+    "-C", "link-arg=-pie",
+    "-C", "link-arg=--no-dynamic-linker",
+    # No text relocations, and the relocated tables become read-only.
+    "-C", "link-arg=-z", "-C", "link-arg=text",
+    "-C", "link-arg=-z", "-C", "link-arg=relro",
+    "-C", "link-arg=-z", "-C", "link-arg=now",
+]

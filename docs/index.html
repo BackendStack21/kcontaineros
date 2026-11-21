@@ -1,0 +1,1048 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kContainerOS: a zero-dependency Rust mini OS for ARM64 containers</title>
+<meta name="description" content="One static Rust binary under 100 kB is PID 1, a small shell and core utilities. No libc, no crates. Init locks the container down before your command starts.">
+<meta name="author" content="21no.de">
+<link rel="canonical" href="https://kcos.21no.de/">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#EEF1F4" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0D1620" media="(prefers-color-scheme: dark)">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%2310202E'/%3E%3Crect x='3' y='3' width='4' height='4' fill='%23F17A3E'/%3E%3Crect x='9' y='3' width='4' height='4' fill='%23EEF1F4'/%3E%3Crect x='3' y='9' width='4' height='4' fill='%2355C4CB'/%3E%3Crect x='9' y='9' width='4' height='4' fill='%23F17A3E'/%3E%3C/svg%3E">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="kContainerOS">
+<meta property="og:url" content="https://kcos.21no.de/">
+<meta property="og:title" content="kContainerOS: a mini OS for ARM64 containers in one binary">
+<meta property="og:description" content="One static Rust binary under 100 kB is PID 1, a small shell and core utilities. No libc, no crates. Init locks the container down before your command starts.">
+<meta property="og:image" content="https://kcos.21no.de/og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="kContainerOS: a mini OS for ARM64 containers in one binary under 100 kB, shown beside a picture of every byte of that binary.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="kContainerOS: a mini OS for ARM64 containers in one binary">
+<meta name="twitter:description" content="One static Rust binary under 100 kB is PID 1, a small shell and core utilities. No libc, no crates. Init locks the container down before your command starts.">
+<meta name="twitter:image" content="https://kcos.21no.de/og.png">
+<meta name="twitter:image:alt" content="kContainerOS: a mini OS for ARM64 containers in one binary under 100 kB, shown beside a picture of every byte of that binary.">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareSourceCode",
+  "name": "kContainerOS",
+  "url": "https://kcos.21no.de/",
+  "codeRepository": "https://github.com/BackendStack21/kcontaineros",
+  "license": "https://opensource.org/licenses/MIT",
+  "author": { "@type": "Organization", "name": "21no.de" },
+  "publisher": { "@type": "Organization", "name": "21no.de" },
+  "image": "https://kcos.21no.de/og.png",
+  "description": "A zero-dependency, Rust-based mini OS userland for ARM64 containers. One static binary with no libc, no std and no crates is PID 1, a small shell and the core utilities, and locks the container down before the command starts.",
+  "programmingLanguage": "Rust",
+  "runtimePlatform": "Linux containers on ARM64 (linux/arm64)",
+  "keywords": "container base image, PID 1, init, Rust, no_std, ARM64, aarch64, Docker, seccomp, Landlock"
+}
+</script>
+<!-- kcos-faq:begin  FAQPage data made from the Common questions section by tools/update-docs.sh; do not edit by hand -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "How do I get a directory my program can write to?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Under init, a top-level directory is either for running programs or for writing, never both. /bin, /sbin, /usr and anything named in KCOS_EXEC hold programs and cannot be written to. Every other top-level directory that exists when the container starts can be, subject to ordinary file permissions. Since the image runs as nobody (65534), the directory also has to belong to that user. Out of the box only /tmp and /var/tmp qualify.\nA directory in the image. WORKDIR creates it owned by the current user, which is nobody:\nFROM kcontaineros\nWORKDIR /data\nOr create it as root and hand it over, for a path below an existing directory or when you do not want it to be the working directory:\nFROM kcontaineros\nUSER 0\nRUN mkdir -p /var/lib/app && chown 65534:65534 /var/lib/app\nUSER 65534:65534\nA volume. Mount it on a directory prepared as above and a new named volume takes over that directory's owner:\ndocker run -v app-data:/data my-image\nMounted on a path the image does not have, the volume is owned by root and nobody cannot write to it. Bind mounts keep the permissions they have on the host.\nA temporary filesystem, owned by the user from the start:\ndocker run --tmpfs /scratch:uid=65534,gid=65534,mode=0700 my-image\nWith --read-only nothing in the image is writable, so every writable path has to be a volume or a tmpfs: docker run --read-only --tmpfs /tmp my-image.\nWhat cannot be made writable:\nanything under /bin, /sbin, /usr or the top-level directory of a KCOS_EXEC entry, even as a volume or tmpfs mounted there;\n/ itself: mkdir /new fails at run time, so create top-level directories in the Dockerfile or let a mount create them.\nIn the sealed image there is no /tmp. Mount one: --tmpfs /tmp:uid=65534,gid=65534,mode=0700."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "My program fails with \"permission denied\" when it starts. Why?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Programs run only from /bin, /sbin and /usr. Copy yours to /usr/local/bin, or declare its directory in the Dockerfile:\nENV KCOS_EXEC=/app\nSeveral directories are separated by colons. Each must be a plain absolute path. That directory's top-level directory then stops being writable, so a program in /app/bin cannot keep its data in /app/data.\nA program that is dynamically linked fails differently, with \"no such file or directory\": its loader is missing. Build it statically."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "A RUN step in my Dockerfile fails with \"permission denied\".",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "The image's user is nobody and its directories are read-only. Switch to root for the build steps that write, then back:\nUSER 0\nRUN mkdir -p /etc/app && echo \"mode=production\" > /etc/app/config\nUSER 65534:65534\nCOPY and WORKDIR need no switch."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does my program need root? What about port 80?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. Under init even root holds no capabilities, so running as root gains almost nothing and gives up the protection of the read-only image. Ports below 1024 work for any user, because Docker makes them unprivileged inside a container. --cap-add and --privileged have no effect on the command.\nA program that starts as root and switches user itself (some servers do) will fail to switch: start it as the final user instead."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How do I check that the lockdown is active?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "docker run --rm my-image cat /proc/self/status\nLook for NoNewPrivs: 1, Seccomp: 2 and CapEff: 0000000000000000. If the kernel has no Landlock, init prints a warning line when the container starts. make test checks the restrictions themselves."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How do I get a shell in a running container?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "docker exec -it CONTAINER sh. That shell starts outside init: it cannot gain privileges and is under the system call filter, but it is not held to the run-or-write rule. The sealed image has no shell; use docker cp to get files out and docker logs to see output."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I use my existing entrypoint script?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Only if it stays within the shell's subset: commands, variables, pipes, && and ||, redirections. A script with if, loops, $(…), [ or globs stops with a syntax error before its first command runs. Either put the logic in your program, or call the program directly:\nENTRYPOINT [\"/sbin/init\", \"--\", \"my-server\", \"--config\", \"/etc/app/config\"]\nKeep /sbin/init first whenever you set ENTRYPOINT; without it nothing on this page is enforced."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How do I add CA certificates or timezone data?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Copy them from an image that has them:\nFROM alpine AS certs\nRUN apk add --no-cache ca-certificates tzdata\n\nFROM kcontaineros\nCOPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/\nCOPY --from=certs /usr/share/zoneinfo /usr/share/zoneinfo"
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "My runtime fails on memfd_create, ptrace or io_uring.",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Those calls are refused on purpose and there is no switch to allow them. A program that needs them needs another base image."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does it work on Kubernetes, or with user namespaces?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Neither has been tested. Nothing in the image depends on Docker itself, but that is reasoning, not a result."
+      }
+    }
+  ]
+}
+</script>
+<!-- kcos-faq:end -->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+/* A component datasheet: label column on the left, content on the right,
+   hairlines between entries. The hero's only image is the binary itself. */
+:root {
+  --paper: #EEF1F4;
+  --panel: #E1E7ED;
+  --ink: #10202E;
+  --muted: #4E6074;
+  --line: #C3CDD7;
+  --rust: #B7410E;
+  --teal: #0C6B74;
+  --px-zero: #D9E0E7;
+  --px-lo: #7F93A8;
+  --sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0D1620; --panel: #152130; --ink: #E3EAF1; --muted: #93A5B8; --line: #26374A;
+    --rust: #F17A3E; --teal: #55C4CB; --px-zero: #172433; --px-lo: #3F566E;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0D1620; --panel: #152130; --ink: #E3EAF1; --muted: #93A5B8; --line: #26374A;
+  --rust: #F17A3E; --teal: #55C4CB; --px-zero: #172433; --px-lo: #3F566E;
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 400 17px/1.6 var(--sans); }
+.wrap {
+  max-width: 1120px; margin: 0 auto; padding-block: 24px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+h1, h2, h3, p, ul, ol, dl, dd, figure, pre { margin: 0; }
+ul { padding: 0; list-style: none; }
+a { color: inherit; text-decoration-color: var(--rust); text-underline-offset: 3px; }
+a:hover { color: var(--rust); }
+:focus-visible { outline: 2px solid var(--rust); outline-offset: 3px; }
+code, kbd { font-family: var(--mono); font-size: 0.86em; }
+/* Code is shown as written: no "->" or "=>" turned into arrows. */
+code, kbd, pre, #probe, .legend, .tools { font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }
+p code, li code, dt code, dd code { background: var(--panel); padding: 0.06em 0.34em; white-space: nowrap; }
+/* Long commands may wrap at their spaces; short ones stay whole. */
+code.long { white-space: normal; overflow-wrap: break-word; }
+
+.skip { position: absolute; left: 16px; top: -48px; z-index: 2; padding: 8px 12px;
+  background: var(--ink); color: var(--paper); font: 600 14px/1.2 var(--sans); text-decoration: none; }
+.skip:focus { top: 8px; }
+
+/* top strip */
+.strip { display: flex; flex-wrap: wrap; gap: 6px 24px; justify-content: space-between; align-items: baseline;
+  padding-bottom: 12px; border-bottom: 1px solid var(--ink); }
+.brand { font: 700 16px/1.4 var(--sans); letter-spacing: -0.01em; text-decoration: none; }
+.brand span { margin-left: 10px; font: 400 12px/1.4 var(--mono); color: var(--muted); letter-spacing: 0.02em; }
+.strip nav ul { display: flex; flex-wrap: wrap; gap: 2px 20px; }
+.strip nav a { font: 500 14px/1.6 var(--sans); color: var(--muted); text-decoration: none; }
+.strip nav a:hover { color: var(--rust); }
+
+/* hero */
+.hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 460px); gap: 56px; align-items: start; padding-block: 56px 64px; }
+.hero h1 { font: 700 clamp(32px, 5vw, 56px)/1.06 var(--sans); letter-spacing: -0.035em; text-wrap: balance; }
+.hero h1 em { font-style: normal; color: var(--rust); }
+.lede { margin-top: 24px; max-width: 34em; font-size: 19px; line-height: 1.55; color: var(--muted); }
+.lede strong { color: var(--ink); font-weight: 600; }
+.cmd-note { margin-top: 32px; font-size: 15px; color: var(--muted); }
+.cmd { margin-top: 8px; display: flex; align-items: stretch; max-width: 100%; width: fit-content;
+  border: 1px solid var(--ink); background: var(--panel); }
+.cmd code { padding: 12px 16px; font-size: 14px; overflow-x: auto; white-space: nowrap; min-width: 0; background: none; }
+.cmd code::before { content: "$ "; color: var(--rust); }
+.copy { flex: none; font: 600 12px/1 var(--sans); letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--paper); background: var(--ink); border: 0; border-radius: 0; padding: 0 14px; cursor: pointer; }
+.copy:hover { background: var(--rust); }
+.facts { margin-top: 40px; display: grid; grid-template-columns: repeat(4, auto); gap: 16px 36px; width: fit-content; max-width: 100%; }
+.facts dt { font: 500 11px/1.3 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.facts dd { margin-top: 2px; font: 700 20px/1.3 var(--sans); letter-spacing: -0.02em; }
+
+/* byte map */
+.map .head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 12px; margin-bottom: 8px;
+  font: 400 12px/1.5 var(--mono); color: var(--muted); }
+.map .head b { color: var(--ink); font-weight: 600; }
+.plate { position: relative; border: 1px solid var(--ink); background: var(--px-zero); line-height: 0; }
+#bytes { display: block; width: 100%; height: auto; image-rendering: pixelated; cursor: crosshair; touch-action: none; }
+#bytes:focus-visible { outline-offset: 4px; }
+.cursor { position: absolute; pointer-events: none; border: 1px solid var(--paper); outline: 1px solid var(--ink); }
+#probe { margin-top: 8px; min-height: 4.5em; font: 400 12px/1.5 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+#probe b { color: var(--rust); font-weight: 600; }
+.map-fallback { padding: 18px; border: 1px solid var(--line); background: var(--panel); font-size: 15px; color: var(--muted); }
+.layout { display: flex; height: 14px; margin-top: 10px; border: 1px solid var(--ink); background: var(--px-zero); }
+.layout span { display: block; min-width: 1px; }
+.legend { margin-top: 10px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 18px;
+  font: 400 12px/1.6 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.legend li { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.legend i { flex: none; width: 9px; height: 9px; display: inline-block; }
+.legend span { margin-left: auto; color: var(--ink); }
+.c-code { background: var(--rust); } .c-rodata { background: var(--teal); } .c-unwind { background: var(--px-lo); }
+.c-reloc { background: var(--muted); } .c-head { background: var(--ink); } .c-data { background: var(--rust); opacity: 0.5; }
+.c-pad { background: var(--line); }
+
+/* datasheet rows */
+.row { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 20px 40px; padding-block: 48px; border-top: 1px solid var(--line); }
+.row > h2 { font: 600 13px/1.5 var(--sans); letter-spacing: 0.12em; text-transform: uppercase; color: var(--rust); }
+.lead { font: 700 clamp(22px, 2.7vw, 30px)/1.2 var(--sans); letter-spacing: -0.03em; text-wrap: balance; max-width: 24em; }
+.body > p:not(.lead), .body .text { margin-top: 14px; max-width: 40em; color: var(--muted); }
+.body > p strong { color: var(--ink); font-weight: 600; }
+.body h3 { margin-top: 44px; font: 700 20px/1.3 var(--sans); letter-spacing: -0.02em; }
+.body h3 + p { margin-top: 8px; }
+
+.parts { margin-top: 28px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--ink); }
+.parts > div { padding: 20px; min-width: 0; }
+.parts > div + div { border-left: 1px solid var(--ink); }
+.parts .path { font: 600 15px/1.3 var(--mono); }
+.parts p { margin-top: 10px; font-size: 15px; line-height: 1.55; color: var(--muted); }
+.parts .tools { margin-top: 12px; font: 400 13px/1.8 var(--mono); color: var(--teal); word-spacing: 0.3em; }
+
+pre { font: 400 13.5px/1.65 var(--mono); background: var(--panel); border: 1px solid var(--line);
+  padding: 16px 18px; overflow-x: auto; tab-size: 8; }
+.code { margin-top: 24px; min-width: 0; }
+.code-head { display: flex; justify-content: space-between; align-items: end; gap: 12px; min-height: 30px; }
+.code-head .tag { padding-bottom: 6px; font: 500 11px/1.3 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.code-head .copy { padding: 9px 12px; }
+.c { color: var(--muted); } .k { color: var(--rust); } .s { color: var(--teal); }
+.p { color: var(--rust); } .o { color: var(--muted); }
+.two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; }
+
+.notes { margin-top: 24px; max-width: 46em; }
+.notes > div { padding: 14px 0; border-top: 1px solid var(--line); }
+.notes dt { font-weight: 600; }
+.notes dd { margin-top: 2px; color: var(--muted); font-size: 16px; }
+
+.locks { margin-top: 28px; border-top: 1px solid var(--ink); }
+.locks > div { display: grid; grid-template-columns: minmax(0, 13em) minmax(0, 1fr); gap: 4px 28px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+.locks dt { font-weight: 600; }
+.locks .how { display: block; margin-top: 2px; font: 400 12.5px/1.5 var(--mono); color: var(--teal); }
+.locks dd { color: var(--muted); font-size: 16px; }
+
+.plain { margin-top: 16px; max-width: 46em; }
+.plain li { position: relative; padding: 10px 0 10px 22px; border-top: 1px solid var(--line); color: var(--muted); font-size: 16px; }
+.plain li::before { content: ""; position: absolute; left: 2px; top: 1.15em; width: 8px; height: 8px; background: var(--teal); }
+.plain li strong { color: var(--ink); font-weight: 600; }
+.plain.warn li::before { background: var(--rust); }
+
+.faq { margin-top: 28px; border-top: 1px solid var(--ink); max-width: 52em; }
+.faq details { border-bottom: 1px solid var(--line); }
+.faq summary { display: flex; justify-content: space-between; gap: 16px; align-items: baseline;
+  padding: 16px 0; cursor: pointer; list-style: none; font: 600 18px/1.35 var(--sans); letter-spacing: -0.01em; }
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary > span { min-width: 0; }
+.faq summary code { font-size: 0.82em; background: var(--panel); padding: 0.04em 0.3em; }
+.faq summary::after { content: "+"; flex: none; font: 500 18px/1 var(--mono); color: var(--rust); }
+.faq details[open] > summary::after { content: "\2212"; }
+.faq summary:hover { color: var(--rust); }
+.faq .a { padding-bottom: 22px; }
+.faq .a > p, .faq .a > ul { margin-top: 12px; max-width: 42em; color: var(--muted); }
+.faq .a > p:first-child { margin-top: 0; }
+.faq .a p strong { color: var(--ink); font-weight: 600; }
+.faq .a .code { margin-top: 12px; }
+.faq .a ul { padding-left: 1.2em; list-style: square; }
+.faq .a li { margin-top: 4px; }
+.faq .a li::marker { color: var(--teal); }
+
+footer { border-top: 1px solid var(--ink); padding-top: 16px; font: 400 13px/1.6 var(--sans); color: var(--muted); }
+footer p + p { margin-top: 4px; }
+
+@media (max-width: 860px) {
+  .hero { grid-template-columns: minmax(0, 1fr); gap: 40px; padding-block: 40px 48px; }
+  .map { max-width: 460px; }
+  .row { grid-template-columns: minmax(0, 1fr); gap: 12px; padding-block: 36px; }
+  .parts { grid-template-columns: minmax(0, 1fr); }
+  .parts > div + div { border-left: 0; border-top: 1px solid var(--ink); }
+  .two { grid-template-columns: minmax(0, 1fr); }
+  .facts { grid-template-columns: repeat(2, auto); }
+  .locks > div { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 420px) {
+  body { font-size: 16px; }
+  .lede { font-size: 17px; }
+  .legend { grid-template-columns: minmax(0, 1fr); }
+  pre { font-size: 12.5px; padding: 14px; }
+  .cmd code { padding: 12px 10px; font-size: 12.5px; }
+  .cmd .copy { padding: 0 10px; }
+}
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="wrap">
+  <header class="strip">
+    <a class="brand" href="#main">kContainerOS<span>linux/arm64</span></a>
+    <nav aria-label="Sections">
+      <ul>
+        <li><a href="#start">Get started</a></li>
+        <li><a href="#inside">What is inside</a></li>
+        <li><a href="#lockdown">The lockdown</a></li>
+        <li><a href="#agents">For AI agents</a></li>
+        <li><a href="#questions">Questions</a></li>
+        <li><a href="#limits">Limits</a></li>
+        <li><a class="ext" href="https://github.com/BackendStack21/kcontaineros">Source on GitHub</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero" aria-labelledby="title">
+      <div>
+        <h1 id="title">A mini OS for ARM64 containers, in one binary <em>under 100&nbsp;kB</em>.</h1>
+        <p class="lede">kContainerOS is a container userland written in Rust with no dependencies. <strong>One static binary is PID&nbsp;1, a small shell and the core utilities.</strong> It has no libc, no <code>std</code> and no crates, and talks to the Linux kernel through raw system calls. Init locks the container down before your command starts.</p>
+        <p class="cmd-note">Clone the <a href="https://github.com/BackendStack21/kcontaineros">kContainerOS repository</a>, build with <code>make build</code>, then run:</p>
+        <div class="cmd">
+          <code id="run-cmd">docker run -it --rm kcontaineros</code>
+          <button class="copy" type="button" data-copy="run-cmd" hidden>Copy</button>
+        </div>
+        <dl class="facts">
+          <div><dt>Userland</dt><dd>one binary</dd></div>
+          <div><dt>Libc</dt><dd>none</dd></div>
+          <div><dt>Runs as</dt><dd>nobody</dd></div>
+          <div><dt>Platform</dt><dd>linux/arm64</dd></div>
+        </dl>
+      </div>
+
+      <figure class="map" id="map">
+        <figcaption class="head"><b>/bin/kcontaineros</b><span id="map-meta">1 pixel = 1 byte</span></figcaption>
+        <div class="plate" hidden>
+          <canvas id="bytes" tabindex="0" role="img" aria-label="Every byte of the kContainerOS binary drawn as one pixel" aria-describedby="probe"></canvas>
+          <span class="cursor" hidden></span>
+        </div>
+        <noscript><p class="map-fallback">This panel draws every byte of <code>/bin/kcontaineros</code> as one pixel, coloured by the part of the file it belongs to. The binary is embedded in this page; turn on JavaScript to see it.</p></noscript>
+        <p id="probe" aria-live="polite" hidden></p>
+        <div class="layout" aria-hidden="true" hidden></div>
+        <ul class="legend" aria-label="Parts of the binary, in bytes" hidden></ul>
+      </figure>
+    </section>
+
+    <section class="row" id="start" aria-labelledby="start-h">
+      <h2 id="start-h">Get started</h2>
+      <div class="body">
+        <p class="lead">Build the image, then put your program on top.</p>
+        <p>The image builds inside Docker and always comes out as linux/arm64. <code>make test</code> runs the end-to-end tests against your local Docker daemon and needs an ARM64 host and python3.</p>
+
+        <div class="code">
+          <div class="code-head"><span class="tag">Shell</span><button class="copy" type="button" data-copy="code-sh" hidden>Copy</button></div>
+<pre id="code-sh">git clone https://github.com/BackendStack21/kcontaineros.git
+cd kcontaineros
+<span class="c"># build: docker build --platform linux/arm64 -t kcontaineros .</span>
+make build
+<span class="c"># end-to-end tests against the local Docker daemon</span>
+make test
+<span class="c"># the same tests on an instrumented build, with a coverage report</span>
+make coverage
+<span class="c"># look around</span>
+docker run -it --rm kcontaineros</pre>
+        </div>
+
+        <h3>Put a binary on top of it</h3>
+        <p>Your program must be statically linked. A plain <code>COPY</code> needs no root. <code>examples/hello-http</code> in the repository is a complete image built this way, with a small Rust HTTP server.</p>
+        <div class="code">
+          <div class="code-head"><span class="tag">Dockerfile</span><button class="copy" type="button" data-copy="code-df" hidden>Copy</button></div>
+<pre id="code-df"><span class="k">FROM</span> kcontaineros
+<span class="k">COPY</span> my-server /usr/local/bin/my-server
+<span class="k">CMD</span> [<span class="s">"my-server"</span>]</pre>
+        </div>
+
+        <h3>Before you build on it</h3>
+        <dl class="notes">
+          <div><dt>It runs as <code>nobody</code>, not root.</dt><dd>Build steps that write need <code>USER 0</code> first; switch back with <code>USER 65534:65534</code>. <a href="#questions">Common questions</a> shows how, and how to get a directory your program can write to.</dd></div>
+          <div><dt>Programs run only from <code>/bin</code>, <code>/sbin</code> and <code>/usr</code>.</dt><dd>Put yours in <code>/usr/local/bin</code>, or name its directory: <code>ENV KCOS_EXEC=/app</code>. Whatever directory holds programs cannot be written to at run time, together with the top-level directory it is in. Entries must be plain absolute paths: <code>/</code>, a trailing slash and <code>.</code> or <code>..</code> components are ignored.</dd></div>
+          <div><dt><code>memfd_create</code> is refused.</dt><dd>A few runtimes use it for JIT code or sealed memory; they need another base image.</dd></div>
+          <div><dt>Your command holds no capabilities.</dt><dd>That stays true whatever <code>--cap-add</code> or <code>--privileged</code> say. Ports below 1024 still work, because Docker makes them unprivileged.</dd></div>
+          <div><dt>New top-level directories cannot be created at run time.</dt><dd>Create them in the Dockerfile, or mount a volume there.</dd></div>
+          <div><dt><code>ENTRYPOINT</code> is <code>/sbin/init</code>.</dt><dd><code>CMD</code> runs under it. If you set your own <code>ENTRYPOINT</code>, or pass <code>--entrypoint</code>, init and everything it enforces are gone. Keep it with <code class="long">ENTRYPOINT ["/sbin/init", "--", "my-server"]</code>.</dd></div>
+          <div><dt>With <code>--read-only</code>, <code>/tmp</code>, <code>/var/tmp</code> and <code>/run</code> are read-only too.</dt><dd>Add <code>--tmpfs /tmp</code> if your program writes there.</dd></div>
+        </dl>
+
+        <h3>The sealed variant</h3>
+        <p><code>kcontaineros:sealed</code> is init and nothing else: under 100&nbsp;kB, no shell, no utilities, no writable directory. That binary is built without the shell and utility code, so there is none to reach by renaming it. Use it for the final stage when your image needs no <code>RUN</code> steps.</p>
+        <div class="code">
+          <div class="code-head"><span class="tag">Shell</span><button class="copy" type="button" data-copy="code-sealed" hidden>Copy</button></div>
+<pre id="code-sealed">docker build --platform linux/arm64 --target sealed -t kcontaineros:sealed .</pre>
+        </div>
+        <div class="two">
+          <div class="code">
+            <div class="code-head"><span class="tag">Dockerfile</span><button class="copy" type="button" data-copy="code-df3" hidden>Copy</button></div>
+<pre id="code-df3"><span class="k">FROM</span> kcontaineros:sealed
+<span class="k">COPY</span> my-server /usr/local/bin/my-server
+<span class="k">CMD</span> [<span class="s">"my-server"</span>]</pre>
+          </div>
+          <div class="code">
+            <div class="code-head"><span class="tag">Terminal</span></div>
+<pre><span class="p">$</span> docker run --rm kcontaineros:sealed sh
+<span class="o">kcontaineros: sh: no such file or directory</span></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="row" id="inside" aria-labelledby="inside-h">
+      <h2 id="inside-h">What is inside</h2>
+      <div class="body">
+        <p class="lead">One binary. The name it is started under decides what it is.</p>
+        <p><code>/sbin/init</code>, <code>/bin/sh</code> and every utility are symlinks to <code>/bin/kcontaineros</code>, which reads <code>argv[0]</code> to pick its part. Apart from them and a <code>/var/run</code> link, the image holds only directories and four small files in <code>/etc</code>.</p>
+        <div class="parts">
+          <div>
+            <p class="path">/sbin/init</p>
+            <p>PID&nbsp;1. Locks the container down, starts your command, forwards every signal to it, reaps orphaned zombies and exits with your command's status: <code>128&nbsp;+&nbsp;signal</code> when the command is killed. It never allocates and never polls; it sleeps in <code>rt_sigtimedwait</code>.</p>
+          </div>
+          <div>
+            <p class="path">/bin/sh</p>
+            <p>A small shell, enough for Dockerfile <code>RUN</code> and <code>CMD</code> in shell form, simple entrypoint scripts and <code>docker exec -it … sh</code>. Quoting, variables, <code>${VAR:-default}</code>, <code>"$@"</code>, pipes, <code>&amp;&amp;</code>, <code>||</code>, redirections, <code>set -e</code> and <code>-x</code>.</p>
+          </div>
+          <div>
+            <p class="path">/bin/*</p>
+            <p>Core utilities with their common flags only, such as <code>ls -la</code>, <code>rm -rf</code>, <code>mkdir -p</code>, <code>ln -s</code> and <code>chown UID:GID</code>.</p>
+            <p class="tools">cat chmod chown cp echo env false kill ln ls mkdir mv ps pwd rm sleep touch true uname</p>
+          </div>
+        </div>
+
+        <h3>A session as the default user</h3>
+        <p>The <code>$</code> prompt means you are not root. A program copied to <code>/tmp</code> does not run, the image's program directories cannot be written to, and ordinary files in <code>/tmp</code> work as usual.</p>
+        <div class="code">
+          <div class="code-head"><span class="tag">Terminal</span></div>
+<pre><span class="p">$</span> docker run -it --rm kcontaineros
+<span class="p">/ $</span> ps
+<span class="o">  PID S COMMAND
+    1 S /sbin/init /bin/sh
+    7 S /bin/sh
+    8 R ps</span>
+<span class="p">/ $</span> cp /bin/ls /tmp/ls
+<span class="p">/ $</span> /tmp/ls
+<span class="o">sh: /tmp/ls: permission denied</span>
+<span class="p">/ $</span> touch /usr/local/bin/x
+<span class="o">touch: /usr/local/bin/x: permission denied</span>
+<span class="p">/ $</span> mkdir /app
+<span class="o">mkdir: /app: permission denied</span>
+<span class="p">/ $</span> echo hi &gt; /tmp/note; cat /tmp/note
+<span class="o">hi</span>
+<span class="p">/ $</span> exit 7
+<span class="p">$</span> echo $?
+<span class="o">7</span></pre>
+        </div>
+
+        <h3>Stopping</h3>
+        <p>Init forwards every signal it receives to your command. A server with no signal handling of its own, like the one in <code>examples/hello-http</code>, still stops as soon as <code>docker stop</code> sends <code>SIGTERM</code>, and the container exits with status 143 (128&nbsp;+&nbsp;15). Run as PID&nbsp;1 without init, the same server would not get the signal: the kernel does not deliver <code>SIGTERM</code> to a PID&nbsp;1 that has no handler for it, so Docker waits out its timeout and then sends <code>SIGKILL</code>.</p>
+
+        <h3>Every system call goes through one function</h3>
+        <p>There is no libc underneath. This is the only place in the source where the binary enters the kernel.</p>
+        <div class="code">
+          <div class="code-head"><span class="tag">src/sys.rs</span></div>
+<pre><span class="k">unsafe fn</span> sc(n: usize, a: usize, b: usize, c: usize, d: usize, e: usize, f: usize) -&gt; isize {
+    <span class="k">let</span> ret: isize;
+    asm!(
+        <span class="s">"svc 0"</span>,
+        in(<span class="s">"x8"</span>) n,
+        inlateout(<span class="s">"x0"</span>) a =&gt; ret,
+        in(<span class="s">"x1"</span>) b, in(<span class="s">"x2"</span>) c, in(<span class="s">"x3"</span>) d, in(<span class="s">"x4"</span>) e, in(<span class="s">"x5"</span>) f,
+        options(nostack)
+    );
+    ret
+}</pre>
+        </div>
+
+        <h3>Utilities hardened after adversarial review</h3>
+        <ul class="plain">
+          <li><code>rm -r</code> walks the tree through directory descriptors opened without following symlinks, so a symlink swapped in during the walk cannot send it elsewhere. It refuses <code>/</code>, <code>.</code> and <code>..</code>, and trees deeper than 4096 levels.</li>
+          <li><code>kill</code> accepts only real process IDs: <code>0</code>, <code>-1</code> and numbers that would wrap around a 32-bit PID are rejected.</li>
+          <li><code>cp</code> never copies setuid, setgid or sticky bits, and refuses to copy a file onto itself.</li>
+          <li><code>ps</code> always, and <code>ls</code> on a terminal, replace everything but printable ASCII in names with <code>?</code>.</li>
+          <li>The shell rejects what it does not implement instead of running it as something else, and checks a whole script before running its first line.</li>
+          <li>A utility whose output cannot be written, because the disk is full or the descriptor is closed, exits with status 1.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="row" id="lockdown" aria-labelledby="lockdown-h">
+      <h2 id="lockdown-h">The lockdown</h2>
+      <div class="body">
+        <p class="lead">Restrictions applied before your command starts, enforced by the kernel.</p>
+        <p>The aim is that code running inside the container, including code an attacker has taken over, cannot gain privilege, cannot loosen its restrictions and cannot run a program it brought with it. Init applies the restrictions to itself before it starts your command. The kernel enforces them, every process inherits them, and none can be undone from inside.</p>
+
+        <dl class="locks">
+          <div><dt>No privilege gain<span class="how">no_new_privs</span></dt><dd>Setuid binaries and file capabilities grant nothing.</dd></div>
+          <div><dt>No capabilities<span class="how">bounding, ambient and process sets emptied</span></dt><dd>Root in the container is an ordinary user to the kernel, even under <code>--privileged</code>.</dd></div>
+          <div><dt>Run or write, never both<span class="how">Landlock, plus the filter for memory files</span></dt><dd>Programs execute only from the image's program directories, and those cannot be written to, whatever the file permissions. A binary dropped in <code>/tmp</code> or on a volume does not run, and memory files (<code>memfd_create</code>) cannot be created at all.</dd></div>
+          <div><dt>Reduced kernel surface<span class="how">seccomp filter, on top of Docker's</span></dt><dd><code>ptrace</code>, reading or writing another process's memory, new namespaces, mounts, <code>chroot</code>, kernel modules, <code>bpf</code>, <code>io_uring</code>, <code>perf</code>, keyrings, clock and hostname changes, and switching off address randomisation are refused. System calls newer than the filter knows are answered "not implemented".</dd></div>
+          <div><dt>Nothing to tamper with<span class="how">read-only image files owned by root; default user nobody</span></dt><dd>The default user cannot modify the image.</dd></div>
+          <div><dt>PID&nbsp;1 is opaque<span class="how">not dumpable</span></dt><dd>Other processes cannot read its memory or environment.</dd></div>
+        </dl>
+
+        <h3>Checked against a privileged root attacker</h3>
+        <p><code>make test</code> checks each of these against the strongest attacker Docker can hand over: root, <code>--privileged</code>, and Docker's own system call filter switched off. It runs the same attempts without init as a control, where they succeed.</p>
+        <p>You can see the effect yourself. Even as root in a privileged container, the command holds no capabilities, cannot gain any, and runs under a seccomp filter (<code>Seccomp: 2</code>).</p>
+        <div class="code">
+          <div class="code-head"><span class="tag">Terminal</span></div>
+<pre><span class="p">$</span> docker run --rm --privileged --user 0 kcontaineros \
+    sh -c 'cp /bin/ls /tmp/ls; /tmp/ls; touch /usr/local/bin/x; mkdir /app'
+<span class="o">sh: /tmp/ls: permission denied
+touch: /usr/local/bin/x: permission denied
+mkdir: /app: permission denied</span>
+<span class="p">$</span> docker run --rm --privileged --user 0 kcontaineros cat /proc/self/status \
+    | grep -E '^(Cap(Inh|Prm|Eff|Bnd|Amb)|NoNewPrivs|Seccomp):'
+<span class="o">CapInh:	0000000000000000
+CapPrm:	0000000000000000
+CapEff:	0000000000000000
+CapBnd:	0000000000000000
+CapAmb:	0000000000000000
+NoNewPrivs:	1
+Seccomp:	2</span></pre>
+        </div>
+
+        <h3>How the binary is built</h3>
+        <ul class="plain">
+          <li><strong>Static PIE.</strong> The kernel loads it at a random address on every start and the binary relocates itself. Code, data, stack and heap are all randomised.</li>
+          <li><strong>Read-only after start.</strong> Function and string tables are made read-only once relocated (RELRO). No segment is both writable and executable, and the stack is not executable.</li>
+          <li><strong>Pinned and reproducible.</strong> The compiler image is pinned by digest, the toolchain by version, and a rebuild from scratch produces the identical image layer.</li>
+          <li><strong>No signal handlers and no threads.</strong> PID&nbsp;1 consumes signals synchronously, so there is no handler code to race.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="row" id="agents" aria-labelledby="agents-h">
+      <h2 id="agents-h">For AI agents</h2>
+      <div class="body">
+        <p class="lead">An agent that can run tools will sooner or later run something you did not intend. This image limits what that can turn into.</p>
+        <p>An AI agent acts through tools: a process that runs commands, edits files or calls services on the model's behalf. Text the model reads can steer it, so the tool process has to be treated as something an attacker may end up directing. What matters then is what is within reach from there. Put the tool server in this image and the usual next steps are refused by the kernel, not by instructions the model is asked to follow.</p>
+
+        <dl class="locks">
+          <div><dt>Fetch a program and run it<span class="how">run or write, never both</span></dt><dd>Nothing written at run time can be executed: not from <code>/tmp</code>, not from a volume, not from memory. The programs that run are the ones you built into the image.</dd></div>
+          <div><dt>Become root, or use root<span class="how">no capabilities, no_new_privs</span></dt><dd>There is nothing to escalate to. Root in the container is an ordinary user to the kernel.</dd></div>
+          <div><dt>Replace its own tools<span class="how">program directories are not writable</span></dt><dd>The tool server and everything beside it cannot be modified or swapped while the container runs.</dd></div>
+          <div><dt>Go after the kernel<span class="how">seccomp filter</span></dt><dd>New namespaces, mounts, <code>ptrace</code>, <code>bpf</code>, <code>io_uring</code> and the other usual first steps of a container escape are refused.</dd></div>
+          <div><dt>Use what is lying around<span class="how">the sealed image</span></dt><dd>There is no shell, no interpreter and no package manager in the image: only init and what you copy in.</dd></div>
+          <div><dt>Keep running after you say stop<span class="how">init forwards signals</span></dt><dd><code>docker stop</code> reaches the tool server at once, even if it never set up signal handling. The short-lived processes agents leave behind are reaped.</dd></div>
+        </dl>
+
+        <h3>A tool server in a sealed box</h3>
+        <p>Build the tool server as a static binary and put it on the sealed image. The image cannot decide the network, memory, process count or what is mounted, so set those when you run it. A tool server that talks over standard input and output needs no network at all.</p>
+        <div class="two">
+          <div class="code">
+            <div class="code-head"><span class="tag">Dockerfile</span><button class="copy" type="button" data-copy="code-agent-df" hidden>Copy</button></div>
+<pre id="code-agent-df"><span class="k">FROM</span> kcontaineros:sealed
+<span class="k">COPY</span> agent-tools /usr/local/bin/agent-tools
+<span class="k">CMD</span> [<span class="s">"agent-tools"</span>]</pre>
+          </div>
+          <div class="code">
+            <div class="code-head"><span class="tag">Shell</span><button class="copy" type="button" data-copy="code-agent-run" hidden>Copy</button></div>
+<pre id="code-agent-run">docker run -i --rm --read-only --network none \
+    --memory 512m --pids-limit 128 \
+    --tmpfs /work:uid=65534,gid=65534,mode=0700 \
+    my-agent-tools</pre>
+          </div>
+        </div>
+        <p>Run that way, a tool server can write its working files to <code>/work</code> and nowhere else, cannot execute anything it writes there, has no network, and holds no privilege.</p>
+
+        <h3>What this does not contain</h3>
+        <ul class="plain warn">
+          <li><strong>It does not limit the network.</strong> Without <code>--network none</code> or a network you restrict yourself, an agent can send anything it can read to anywhere it can reach.</li>
+          <li><strong>It does not limit what can be read.</strong> Every file and secret you mount is readable by the tool server. Mount only what the tools need.</li>
+          <li><strong>It does not judge what your tools do.</strong> A tool that deletes files will delete them for a hijacked agent too. The image contains the process, not the purpose.</li>
+          <li><strong>An interpreter is a way around the run rule.</strong> Copy in Python, Node or a shell and the agent can run any script through it. The rule stops programs brought in at run time, not code fed to an interpreter you shipped. The full image ships a small shell; the sealed image does not.</li>
+          <li><strong>It is not a development environment.</strong> Agents that need compilers, package managers or dynamically linked tools do not fit. This is for a fixed set of tools built as static binaries.</li>
+          <li><strong>It has not been tested with any agent framework.</strong> The behaviour above was checked with a stand-in program run under exactly these options.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="row" id="questions" aria-labelledby="questions-h">
+      <h2 id="questions-h">Common questions</h2>
+      <div class="body">
+        <p class="lead">Each answer was checked by running it against the image.</p>
+        <div class="faq">
+          <details id="q-writable" open>
+            <summary><span>How do I get a directory my program can write to?</span></summary>
+            <div class="a">
+              <p>Under init, a top-level directory is either for running programs or for writing, never both. <code>/bin</code>, <code>/sbin</code>, <code>/usr</code> and anything named in <code>KCOS_EXEC</code> hold programs and cannot be written to. Every other top-level directory that exists when the container starts can be, subject to ordinary file permissions. Since the image runs as <code>nobody</code> (65534), the directory also has to belong to that user. Out of the box only <code>/tmp</code> and <code>/var/tmp</code> qualify.</p>
+              <p><strong>A directory in the image.</strong> <code>WORKDIR</code> creates it owned by the current user, which is <code>nobody</code>:</p>
+              <div class="code">
+                <div class="code-head"><span class="tag">Dockerfile</span><button class="copy" type="button" data-copy="q-df-workdir" hidden>Copy</button></div>
+<pre id="q-df-workdir"><span class="k">FROM</span> kcontaineros
+<span class="k">WORKDIR</span> /data</pre>
+              </div>
+              <p>Or create it as root and hand it over, for a path below an existing directory or when you do not want it to be the working directory:</p>
+              <div class="code">
+                <div class="code-head"><span class="tag">Dockerfile</span><button class="copy" type="button" data-copy="q-df-chown" hidden>Copy</button></div>
+<pre id="q-df-chown"><span class="k">FROM</span> kcontaineros
+<span class="k">USER</span> 0
+<span class="k">RUN</span> mkdir -p /var/lib/app &amp;&amp; chown 65534:65534 /var/lib/app
+<span class="k">USER</span> 65534:65534</pre>
+              </div>
+              <p><strong>A volume.</strong> Mount it on a directory prepared as above and a new named volume takes over that directory's owner:</p>
+              <div class="code">
+                <div class="code-head"><span class="tag">Shell</span><button class="copy" type="button" data-copy="q-sh-volume" hidden>Copy</button></div>
+<pre id="q-sh-volume">docker run -v app-data:/data my-image</pre>
+              </div>
+              <p>Mounted on a path the image does not have, the volume is owned by root and <code>nobody</code> cannot write to it. Bind mounts keep the permissions they have on the host.</p>
+              <p><strong>A temporary filesystem</strong>, owned by the user from the start:</p>
+              <div class="code">
+                <div class="code-head"><span class="tag">Shell</span><button class="copy" type="button" data-copy="q-sh-tmpfs" hidden>Copy</button></div>
+<pre id="q-sh-tmpfs">docker run --tmpfs /scratch:uid=65534,gid=65534,mode=0700 my-image</pre>
+              </div>
+              <p><strong>With <code>--read-only</code></strong> nothing in the image is writable, so every writable path has to be a volume or a tmpfs: <code class="long">docker run --read-only --tmpfs /tmp my-image</code>.</p>
+              <p>What cannot be made writable:</p>
+              <ul>
+                <li>anything under <code>/bin</code>, <code>/sbin</code>, <code>/usr</code> or the top-level directory of a <code>KCOS_EXEC</code> entry, even as a volume or tmpfs mounted there;</li>
+                <li><code>/</code> itself: <code>mkdir /new</code> fails at run time, so create top-level directories in the Dockerfile or let a mount create them.</li>
+              </ul>
+              <p>In the sealed image there is no <code>/tmp</code>. Mount one: <code class="long">--tmpfs /tmp:uid=65534,gid=65534,mode=0700</code>.</p>
+            </div>
+          </details>
+
+          <details id="q-exec-denied">
+            <summary><span>My program fails with "permission denied" when it starts. Why?</span></summary>
+            <div class="a">
+              <p>Programs run only from <code>/bin</code>, <code>/sbin</code> and <code>/usr</code>. Copy yours to <code>/usr/local/bin</code>, or declare its directory in the Dockerfile:</p>
+              <div class="code">
+                <div class="code-head"><span class="tag">Dockerfile</span><button class="copy" type="button" data-copy="q-df-exec" hidden>Copy</button></div>
+<pre id="q-df-exec"><span class="k">ENV</span> KCOS_EXEC=/app</pre>
+              </div>
+              <p>Several directories are separated by colons. Each must be a plain absolute path. That directory's top-level directory then stops being writable, so a program in <code>/app/bin</code> cannot keep its data in <code>/app/data</code>.</p>
+              <p>A program that is dynamically linked fails differently, with "no such file or directory": its loader is missing. Build it statically.</p>
+            </div>
+          </details>
+
+          <details id="q-run-step">
+            <summary><span>A <code>RUN</code> step in my Dockerfile fails with "permission denied".</span></summary>
+            <div class="a">
+              <p>The image's user is <code>nobody</code> and its directories are read-only. Switch to root for the build steps that write, then back:</p>
+              <div class="code">
+                <div class="code-head"><span class="tag">Dockerfile</span><button class="copy" type="button" data-copy="q-df-run" hidden>Copy</button></div>
+<pre id="q-df-run"><span class="k">USER</span> 0
+<span class="k">RUN</span> mkdir -p /etc/app &amp;&amp; echo <span class="s">"mode=production"</span> &gt; /etc/app/config
+<span class="k">USER</span> 65534:65534</pre>
+              </div>
+              <p><code>COPY</code> and <code>WORKDIR</code> need no switch.</p>
+            </div>
+          </details>
+
+          <details id="q-root">
+            <summary><span>Does my program need root? What about port 80?</span></summary>
+            <div class="a">
+              <p>No. Under init even root holds no capabilities, so running as root gains almost nothing and gives up the protection of the read-only image. Ports below 1024 work for any user, because Docker makes them unprivileged inside a container. <code>--cap-add</code> and <code>--privileged</code> have no effect on the command.</p>
+              <p>A program that starts as root and switches user itself (some servers do) will fail to switch: start it as the final user instead.</p>
+            </div>
+          </details>
+
+          <details id="q-check">
+            <summary><span>How do I check that the lockdown is active?</span></summary>
+            <div class="a">
+              <div class="code">
+                <div class="code-head"><span class="tag">Shell</span><button class="copy" type="button" data-copy="q-sh-status" hidden>Copy</button></div>
+<pre id="q-sh-status">docker run --rm my-image cat /proc/self/status</pre>
+              </div>
+              <p>Look for <code>NoNewPrivs: 1</code>, <code>Seccomp: 2</code> and <code>CapEff: 0000000000000000</code>. If the kernel has no Landlock, init prints a warning line when the container starts. <code>make test</code> checks the restrictions themselves.</p>
+            </div>
+          </details>
+
+          <details id="q-shell">
+            <summary><span>How do I get a shell in a running container?</span></summary>
+            <div class="a">
+              <p><code>docker exec -it CONTAINER sh</code>. That shell starts outside init: it cannot gain privileges and is under the system call filter, but it is not held to the run-or-write rule. The sealed image has no shell; use <code>docker cp</code> to get files out and <code>docker logs</code> to see output.</p>
+            </div>
+          </details>
+
+          <details id="q-entrypoint">
+            <summary><span>Can I use my existing entrypoint script?</span></summary>
+            <div class="a">
+              <p>Only if it stays within the shell's subset: commands, variables, pipes, <code>&amp;&amp;</code> and <code>||</code>, redirections. A script with <code>if</code>, loops, <code>$(…)</code>, <code>[</code> or globs stops with a syntax error before its first command runs. Either put the logic in your program, or call the program directly:</p>
+              <div class="code">
+                <div class="code-head"><span class="tag">Dockerfile</span><button class="copy" type="button" data-copy="q-df-entry" hidden>Copy</button></div>
+<pre id="q-df-entry"><span class="k">ENTRYPOINT</span> [<span class="s">"/sbin/init"</span>, <span class="s">"--"</span>, <span class="s">"my-server"</span>, <span class="s">"--config"</span>, <span class="s">"/etc/app/config"</span>]</pre>
+              </div>
+              <p>Keep <code>/sbin/init</code> first whenever you set <code>ENTRYPOINT</code>; without it nothing on this page is enforced.</p>
+            </div>
+          </details>
+
+          <details id="q-certs">
+            <summary><span>How do I add CA certificates or timezone data?</span></summary>
+            <div class="a">
+              <p>Copy them from an image that has them:</p>
+              <div class="code">
+                <div class="code-head"><span class="tag">Dockerfile</span><button class="copy" type="button" data-copy="q-df-certs" hidden>Copy</button></div>
+<pre id="q-df-certs"><span class="k">FROM</span> alpine <span class="k">AS</span> certs
+<span class="k">RUN</span> apk add --no-cache ca-certificates tzdata
+
+<span class="k">FROM</span> kcontaineros
+<span class="k">COPY</span> --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+<span class="k">COPY</span> --from=certs /usr/share/zoneinfo /usr/share/zoneinfo</pre>
+              </div>
+            </div>
+          </details>
+
+          <details id="q-refused">
+            <summary><span>My runtime fails on <code>memfd_create</code>, <code>ptrace</code> or <code>io_uring</code>.</span></summary>
+            <div class="a">
+              <p>Those calls are refused on purpose and there is no switch to allow them. A program that needs them needs another base image.</p>
+            </div>
+          </details>
+
+          <details id="q-kubernetes">
+            <summary><span>Does it work on Kubernetes, or with user namespaces?</span></summary>
+            <div class="a">
+              <p>Neither has been tested. Nothing in the image depends on Docker itself, but that is reasoning, not a result.</p>
+            </div>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <section class="row" id="limits" aria-labelledby="limits-h">
+      <h2 id="limits-h">Limits</h2>
+      <div class="body">
+        <p class="lead">What it will not do, and what the lockdown does not promise.</p>
+
+        <h3>What it will not do</h3>
+        <dl class="notes">
+          <div><dt>Static binaries only.</dt><dd>There is no libc and no dynamic loader. Rust on musl and busybox are tested. Go with <code>CGO_ENABLED=0</code> and Zig produce the same kind of binary but are not in the test suite. A dynamically linked program needs its loader and libraries copied in.</dd></div>
+          <div><dt>ARM64 only.</dt><dd>linux/arm64 is the only supported architecture. <code>docker build</code> stops with an error for any other.</dd></div>
+          <div><dt>No CA certificates, timezone data or <code>/etc/services</code>.</dt><dd>Copy them in if your program makes TLS connections or needs local time.</dd></div>
+          <div><dt>The shell is not POSIX-complete.</dt><dd>It has no <code>if</code>, <code>for</code>, <code>while</code> or <code>case</code>, no functions, no globbing, no <code>$(…)</code>, no here-documents and no <code>[</code> or <code>test</code>. Scripts that use them stop with a syntax error before doing anything. Copy in another shell if a script needs more.</dd></div>
+          <div><dt>One command, no supervisor.</dt><dd>Init runs a single command and does not restart it. Use the shell's <code>&amp;</code> and <code>wait</code> for more than one process.</dd></div>
+          <div><dt>No package manager and no <code>adduser</code>.</dt><dd>Add files with <code>COPY</code>. <code>/etc/passwd</code> has <code>root</code> and <code>nobody</code>.</dd></div>
+          <div><dt>A userland, not a bootable OS.</dt><dd>The kernel comes from the container runtime. kContainerOS does not boot on bare metal or in a VM.</dd></div>
+        </dl>
+
+        <h3>What the lockdown does not guarantee</h3>
+        <p>No image can honestly claim these, and this one does not.</p>
+        <ul class="plain warn">
+          <li><strong>It is not a guarantee against kernel bugs.</strong> The filter removes the interfaces most exploits start from; it cannot remove the kernel.</li>
+          <li><strong>Code that is already running can still compute.</strong> An attacker with code execution inside your server can use what your server can reach: its files, its network, its memory. The restrictions stop them going further, not from being there.</li>
+          <li><strong>Processes of the same user can write each other's memory through <code>/proc/PID/mem</code></strong> unless the host enables Yama. Run one service per container.</li>
+          <li><strong><code>docker exec</code>, <code>--entrypoint</code> and <code>RUN</code> steps start outside init.</strong> A shell or utility started that way still applies <code>no_new_privs</code> and the filter to itself, but keeps the capabilities Docker gave it and is not under the Landlock rules: build steps have to be able to write the image. Other programs started that way get only what Docker gives them.</li>
+          <li><strong>The shell will interpret a script from anywhere</strong>, including one an attacker wrote to <code>/tmp</code>. It cannot be executed directly, and the shell running it is under the same restrictions, but it is attacker-chosen logic. The sealed image has no shell.</li>
+          <li><strong>On kernels without Landlock</strong> (before 5.19, or with it disabled) init prints a warning and the run-or-write rule is not enforced. Everything else is; if the filter itself cannot be installed, init refuses to start.</li>
+          <li><strong>Started as non-root, init cannot empty the capability bounding set.</strong> It does not matter: with <code>no_new_privs</code> nothing can draw on it.</li>
+          <li><strong>No stack protector or branch protection (BTI/PAC).</strong> Both need a nightly compiler for this target. For the same reason the unwind tables of the prebuilt <code>core</code> library are still in the binary, unused; the picture at the top shows them.</li>
+          <li><strong>User-namespace remapping has not been tested.</strong></li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>kContainerOS: a zero-dependency Rust userland for ARM64 containers. <a href="https://github.com/BackendStack21/kcontaineros">Read the source code and the README on GitHub</a>.</p>
+    <p>MIT licensed. Copyright 21no.de.</p>
+    <p>The terminal sessions on this page were captured from the image, and the picture at the top is its binary.</p>
+  </footer>
+</div>
+
+<!-- kcos-binary:begin  base64 of /bin/kcontaineros, written by tools/update-docs.sh; do not edit by hand -->
+<script type="application/octet-stream" id="kcos-binary">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XSBDT01NQU5EIFtBUkdTLi4uXQogICAgICAga2NvbnRhaW5lcm9zIEFQUExFVCBbQVJHUy4uLl0KICAgICAgIGtjb250YWluZXJvcyAtLWxpc3QgfCAtLXZlcnNpb24Ka2NvbnRhaW5lcm9zOiA6IGFwcGxldCBub3QgZm91bmQKIGludmFsaWQgYXJndW1lbnQgIFBJRCBTIENPTU1BTkQKP3BjP2Q/Yj8tP2w/cz8/P3J3eHN1YnNoZWxscyBhbmQgZnVuY3Rpb25zIGFyZSBub3Qgc3VwcG9ydGVkZ2xvYmJpbmcgaXMgbm90IHN1cHBvcnRlZDsgcXVvdGUgYConLCBgPycgYW5kIGBbJ2B+JyBleHBhbnNpb24gaXMgbm90IHN1cHBvcnRlZDsgdXNlICRIT01FIG9yIHF1b3RlIGl0Y29tbWFuZCBzdWJzdGl0dXRpb24gaXMgbm90IHN1cHBvcnRlZHVudGVybWluYXRlZCBzaW5nbGUgcXVvdGV1bnRlcm1pbmF0ZWQgZG91YmxlIHF1b3RldW5leHBlY3RlZCBlbmQgb2YgaW5wdXQgYWZ0ZXIgYFwndW50ZXJtaW5hdGVkICR7dW5leHBlY3RlZCBlbmQgb2YgaW5wdXQgYWZ0ZXIgYHwndW5leHBlY3RlZCBlbmQgb2YgaW5wdXQgYWZ0ZXIgYCYmJyBvciBgfHwnOiBub3QgZm91bmQKOiBzaDogcGlwZTogc2g6IGZvcms6IGZpbGUgZGVzY3JpcHRvciBvdXQgb2YgcmFuZ2VoZXJlLWRvY3VtZW50cyBhcmUgbm90IHN1cHBvcnRlZHJlc291cmNlIHRlbXBvcmFyaWx5IHVuYXZhaWxhYmxlbWlzc2luZyByZWRpcmVjdGlvbiB0YXJnZXRpZmZpZm9yd2hpbGV1bnRpbGRvc2VsZWN0e30hW1tpZiwgZm9yLCB3aGlsZSwgY2FzZSwgeyB9IGFuZCAhIGFyZSBub3Qgc3VwcG9ydGVkdW5leHBlY3RlZCBgfCd1bmV4cGVjdGVkIG9wZXJhdG9yc2g6IGNhbm5vdCByZWRpcmVjdDogKz8gIyAgJCBzaDogZXhpdDogOiBudW1lcmljIGFyZ3VtZW50IHJlcXVpcmVkCnNoOiBzaGlmdDogY2Fubm90IHNoaWZ0IHRoYXQgbWFueQpzaDogc2V0OiBvbmx5IC1lIGFuZCAteCBhcmUgc3VwcG9ydGVkCnNoOiB1bnN1cHBvcnRlZCBvcHRpb246ICAob25seSAtZSBhbmQgLXgpCnNoOiBzeW50YXggZXJyb3I6IDogYmFkIGZpbGUgZGVzY3JpcHRvcgpzaDogYW1iaWd1b3VzIHJlZGlyZWN0OiB0aGUgdGFyZ2V0IGlzIGVtcHR5Cj4gc2g6IC1jIHJlcXVpcmVzIGFuIGFyZ3VtZW50Ci91c3IvbG9jYWwvYmluOi91c3IvYmluOi9iaW46L3NiaW5QQVRIPWtjb250YWluZXJvczogZm9yazogS0NPU19FWEVDPS9iaW46L3NiaW46L3Vzci4AABcBAAC/AQAAdQAAAA4BAAAPAQAAEAEAALYBAAC4AQAAwAEAAGEAAAAMAQAAJwAAACgAAAApAAAAMwAAAKwBAACtAQAArgEAAK8BAACwAQAAsQEAALoBAAAIAQAACQEAAGgAAAAmAQAAaQAAAGoAAAARAQAAGAEAAPEAAAAaAQAAqQEAAKoBAACrAQAA2QAAANoAAADbAAAAEgAAACoAAAA6AAAAPAAAALsBAABZAAAAdAAAAI4AAAChAAAAogAAAHAAAACqAAAAqwAAAAoBAADgAAAA4QAAAAYBAADrAAAA7QAAAO4AAADvAAAAwgEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGtjb250YWluZXJvczogd2FybmluZzogTGFuZGxvY2sgaXMgdW5hdmFpbGFibGUsIHNvIHByb2dyYW1zIGNhbiBiZSBydW4gZnJvbSBhbnkgcGF0aAprY29udGFpbmVyb3M6IGNhbm5vdCBpbnN0YWxsIHRoZSBzeXN0ZW0gY2FsbCBmaWx0ZXIKb3BlcmF0aW9uIG5vdCBwZXJtaXR0ZWRubyBzdWNoIGZpbGUgb3IgZGlyZWN0b3J5bm8gc3VjaCBwcm9jZXNzaW5wdXQvb3V0cHV0IGVycm9yYXJndW1lbnQgbGlzdCB0b28gbG9uZ2V4ZWMgZm9ybWF0IGVycm9yYmFkIGZpbGUgZGVzY3JpcHRvcm91dCBvZiBtZW1vcnlwZXJtaXNzaW9uIGRlbmllZGRldmljZSBvciByZXNvdXJjZSBidXN5ZmlsZSBleGlzdHNjcm9zcy1kZXZpY2UgbGlua25vdCBhIGRpcmVjdG9yeWlzIGEgZGlyZWN0b3J5dG9vIG1hbnkgb3BlbiBmaWxlc3RleHQgZmlsZSBidXN5bm8gc3BhY2UgbGVmdCBvbiBkZXZpY2VyZWFkLW9ubHkgZmlsZSBzeXN0ZW1maWxlIG5hbWUgdG9vIGxvbmdkaXJlY3Rvcnkgbm90IGVtcHR5dG9vIG1hbnkgbGV2ZWxzIG9mIHN5bWJvbGljIGxpbmtzc291cmNlIGFuZCBkZXN0aW5hdGlvbiBhcmUgdGhlIHNhbWUgZmlsZWRpcmVjdG9yeSB0cmVlIHRvbyBkZWVwZXJyb3JzbG46IHVzYWdlOiBsbiBbLXNdIFRBUkdFVCBMSU5LCmxhOgovcHJvY2NtZGxpbmVbXXJmcm06IG1pc3Npbmcgb3BlcmFuZApybTogcmVmdXNpbmcgdG8gcmVtb3ZlIFNJR0hVUElOVGtpbGw6IGludmFsaWQgc2lnbmFsOiBraWxsOiBpbnZhbGlkIHBpZDoga2lsbDogdXNhZ2U6IGtpbGwgWy1TSUdOQUxdIFBJRC4uLgpjaG1vZDogaW52YWxpZCBtb2RlOiBjaG1vZDogdXNhZ2U6IGNobW9kIE9DVEFMIEZJTEUuLi4KY2hvd246IGludmFsaWQgb3duZXI6IGNob3duOiB1c2FnZTogY2hvd24gVUlEWzpHSURdIEZJTEUuLi4KOiBpbnZhbGlkIG9wdGlvbjogcG1rZGlyOiBtaXNzaW5nIG9wZXJhbmQKc2xlZXA6IGludmFsaWQgdGltZSBpbnRlcnZhbDogdG91Y2g6IG1pc3NpbmcgZmlsZSBvcGVyYW5kCgAAAAAAAAAAAQAAAAAAAAACAAAAAAAAAAMAAAAAAAAABAAAAAAAAAB1bmFtZTogaW52YWxpZCBvcHRpb246IDogdXNhZ2U6ICBTUkMuLi4gRFNUCgEbAzsgBAAAgwAAAFgbAQA4BAAAdBwBAGgEAADsHAEAfAQAAGgdAQCQBAAAtB0BAKgEAAAoHgEA3AQAAJAeAQAQBQAAOB8BADgFAAC4HwEAbAUAAOQfAQCABQAAYCEBAMwFAAAEIgEA4AUAACwjAQAgBgAA7CMBAEwGAACMJAEAgAYAAAgmAQC0BgAAfCgBAPwGAAC4KQEANAcAAFQqAQBIBwAAuC8BAJwHAADINwEA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AgAAAAAAAAAAAAAAAAAAACIAAAAAAAAAAAAAAAAAAAAmAAAAAAAAAAAAAAAAAAAALAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAcAAAAAAAAAAAAAAAAAAAAVQAAAAAAAAAAAAAAAAAAADQAAAAAAAAAAQAAAAAAAAAAAAAAAAAAABcAAAAAAAAAAgAAAAAAAAAAAAAAAAAAABkAAAAAAAAAAwAAAAAAAAAAAAAAAAAAAA8AAAAAAAAABQAAAAAAAAAAAAAAAAAAABIAAAAAAAAABwAAAAAAAAAAAAAAAAAAABYAAAAAAAAACAAAAAAAAAAAAAAAAAAAABEAAAAAAAAACQAAAAAAAAAAAAAAAAAAABMAAAAAAAAACwAAAAAAAAAAAAAAAAAAACAAAAAAAAAADAAAAAAAAAAAAAAAAAAAAA0AAAAAAAAADQAAAAAAAAAAAAAAAAAAABEAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABcAAAAAAAAAEQAAAAAAAAAAAAAAAAAAAAsAAAAAAAAAEgAAAAAAAAAAAAAAAAAAABEAAAAAAAAAFAAAAAAAAAAAAAAAAAAAAA8AAAAAAAAAFQAAAAAAAAAAAAAAAAAAAA4AAAAAAAAAFgAAAAAAAAAAAAAAAAAAABAAAAAAAAAAGAAAAAAAAAAAAAAAAAAAABMAAAAAAAAAGgAAAAAAAAAAAAAAAAAAAA4AAAAAAAAAHAAAAAAAAAAAAAAAAAAAABcAAAAAAAAAHgAAAAAAAAAAAAAAAAAAABUAAAAAAAAAJAAAAAAAAAAAAAAAAAAAABIAAAAAAAAAJwAAAAAAAAAAAAAAAAAAABMAAAAAAAAAKAAAAAAAAAAAAAAAAAAAACEAAAAAAAAAoA8AAAAAAAAAAAAAAAAAACgAAAAAAAAAoQ8AAAAAAAAAAAAAAAAAABcAAAAAAAAAAAAAAAAAAAAfAAAAAAAAAAAAAAAAAAAAFAAAAAAAAAAAAAAAAAAAAAMAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAMAAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAwAAAAAAAAAAAAAAAAAAAAQAAAAAAAAACQAAAAAAAAAAAAAAAAAAAAQAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAQAAAAAAAAADAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAADwAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAEgAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAEwAAAAAAAAAAAAAAAAAAACMAAAAAAAAAAAAAAAAAAAAiAAAAAAAAAAAAAAAAAAAAJgAAAAAAAAAAAAAAAAAAABcAAAAAAAAAAAAAAAAAAAAcAAAAAAAAAB4AAAAAAAAACAAAAAAAAAD7//9vAAAAAAEAAAgAAAAAFQAAAAAAAAAAAAAAAAAAAAcAAAAAAAAAgAIAAAAAAAAIAAAAAAAAAFAKAAAAAAAACQAAAAAAAAAYAAAAAAAAAPn//28AAAAAbgAAAAAAAAAGAAAAAAAAADgCAAAAAAAACwAAAAAAAAAYAAAAAAAAAAUAAAAAAAAAfAIAAAAAAAAKAAAAAAAAAAEAAAAAAAAA9f7/bwAAAABQAgAAAAAAAAQAAAAAAAAAbAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHJ1c3RjIHZlcnNpb24gMS4xMDAuMCAoMGVmMWJjMzg2IDIwMjYtMTEtMDkpAExpbmtlcjogTExEIDIzLjEuNSAoaHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9sbHZtLXByb2plY3QuZ2l0IDBhNTU3OWViNjQ5ZDM2MzRhOWMzMGFjODczMzAwY2MyOTQ0ZmEwNzApAAAuZHluc3ltAC5nbnUuaGFzaAAuaGFzaAAuZHluc3RyAC5yZWxhLmR5bgAucm9kYXRhAC5laF9mcmFtZV9oZHIALmVoX2ZyYW1lAC50ZXh0AC5kYXRhLnJlbC5ybwAuZHluYW1pYwAucmVscm9fcGFkZGluZwAuYnNzAC5jb21tZW50AC5zaHN0cnRhYgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAsAAAACAAAAAAAAADgCAAAAAAAAOAIAAAAAAAAYAAAAAAAAAAQAAAABAAAACAAAAAAAAAAYAAAAAAAAAAkAAAD2//9vAgAAAAAAAABQAgAAAAAAAFACAAAAAAAAHAAAAAAAAAABAAAAAAAAAAgAAAAAAAAAAAAAAAAAAAATAAAABQAAAAIAAAAAAAAAbAIAAAAAAABsAgAAAAAAABAAAAAAAAAAAQAAAAAAAAAEAAAAAAAAAAQAAAAAAAAAGQAAAAMAAAACAAAAAAAAAHwCAAAAAAAAfAIAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAACEAAAAEAAAAAgAAAAAAAACAAgAAAAAAAIACAAAAAAAAUAoAAAAAAAABAAAAAAAAAAgAAAAAAAAAGAAAAAAAAAArAAAAAQAAADIAAAAAAAAA0AwAAAAAAADQDAAAAAAAABwLAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAMwAAAAEAAAACAAAAAAAAAOwXAAAAAAAA7BcAAAAAAAAkBAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAEEAAAABAAAAAgAAAAAAAAAQHAAAAAAAABAcAAAAAAAAFBcAAAAAAAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAAAABLAAAAAQAAAAYAAAAAAAAAJDMBAAAAAAAkMwAAAAAAAMTNAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAUQAAAAEAAAADAAAAAAAAAOgAAwAAAAAA6AABAAAAAABYBwAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAF4AAAAGAAAAAwAAAAAAAABACAMAAAAAAEAIAQAAAAAA4AAAAAAAAAAEAAAAAAAAAAgAAAAAAAAAEAAAAAAAAABnAAAACAAAAAMAAAAAAAAAIAkDAAAAAAAgCQEAAAAAAOAGAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAdgAAAAgAAAADAAAAAAAAACAJBAAAAAAAIAkBAAAAAAB5AAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAHsAAAABAAAAMAAAAAAAAAAAAAAAAAAAACAJAQAAAAAAmgAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAQAAAAAAAACEAAAAAwAAAAAAAAAAAAAAAAAAAAAAAAC6CQEAAAAAAI4AAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAA</script>
+<!-- kcos-binary:end -->
+
+<script>
+(function () {
+  "use strict";
+
+  // Copy buttons: shown only when this script runs.
+  function selectText(el) {
+    try {
+      var r = document.createRange(); r.selectNodeContents(el);
+      var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+    } catch (e) {}
+  }
+  Array.prototype.forEach.call(document.querySelectorAll(".copy[data-copy]"), function (btn) {
+    var el = document.getElementById(btn.getAttribute("data-copy"));
+    if (!el) return;
+    btn.hidden = false;
+    btn.setAttribute("aria-label", "Copy " + (btn.previousElementSibling ? btn.previousElementSibling.textContent : "command"));
+    btn.addEventListener("click", function () {
+      var text = el.textContent;
+      var done = function () {
+        btn.textContent = "Copied";
+        setTimeout(function () { btn.textContent = "Copy"; }, 1400);
+      };
+      var fallback = function () { selectText(el); btn.textContent = "Press Ctrl+C"; setTimeout(function () { btn.textContent = "Copy"; }, 2400); };
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+        else fallback();
+      } catch (e) { fallback(); }
+    });
+  });
+
+  // A link to one of the questions opens it.
+  function openTarget() {
+    var t = null;
+    try { t = location.hash && document.getElementById(decodeURIComponent(location.hash.slice(1))); } catch (e) {}
+    if (t && t.tagName === "DETAILS") t.open = true;
+  }
+  window.addEventListener("hashchange", openTarget);
+  openTarget();
+
+  // The byte map. Everything it shows is read from the embedded binary.
+  var data = document.getElementById("kcos-binary");
+  var canvas = document.getElementById("bytes");
+  if (!data || !canvas || !canvas.getContext || typeof atob !== "function") return;
+  var raw;
+  try { raw = atob(data.textContent.replace(/\s+/g, "")); } catch (e) { return; }
+  var N = raw.length;
+  if (!N) return;
+  var bytes = new Uint8Array(N);
+  for (var i = 0; i < N; i++) bytes[i] = raw.charCodeAt(i);
+
+  var CATS = {
+    code:   { label: "Code", cls: "c-code", color: "--rust" },
+    rodata: { label: "Constants and strings", cls: "c-rodata", color: "--teal" },
+    unwind: { label: "Unwind tables", cls: "c-unwind", color: "--px-lo" },
+    reloc:  { label: "Relocations and tables", cls: "c-reloc", color: "--muted" },
+    data:   { label: "Writable data", cls: "c-data", color: "--rust" },
+    head:   { label: "Headers and names", cls: "c-head", color: "--ink" },
+    pad:    { label: "Alignment padding", cls: "c-pad", color: "--line" }
+  };
+
+  // Parse the ELF64 little-endian headers: program headers, section headers
+  // and section names. Returns file regions sorted by offset, gaps included.
+  function parseElf(b) {
+    var n = b.length;
+    if (n < 64 || b[0] !== 0x7f || b[1] !== 0x45 || b[2] !== 0x4c || b[3] !== 0x46 || b[4] !== 2 || b[5] !== 1) return null;
+    var dv = new DataView(b.buffer, b.byteOffset, n);
+    var u16 = function (o) { return dv.getUint16(o, true); };
+    var u32 = function (o) { return dv.getUint32(o, true); };
+    var u64 = function (o) { return u32(o) + u32(o + 4) * 4294967296; };
+    var type = u16(16), machine = u16(18);
+    var phoff = u64(32), shoff = u64(40), ehsize = u16(52);
+    var phentsize = u16(54), phnum = u16(56), shentsize = u16(58), shnum = u16(60), shstrndx = u16(62);
+    var regions = [];
+    function add(start, size, name, cat) {
+      if (size > 0 && start < n) regions.push({ start: start, end: Math.min(n, start + size), name: name, cat: cat });
+    }
+    add(0, ehsize, "ELF header", "head");
+    add(phoff, phnum * phentsize, "program headers", "head");
+    add(shoff, shnum * shentsize, "section headers", "head");
+
+    var interp = false, relro = null;
+    for (var k = 0; k < phnum; k++) {
+      var p = phoff + k * phentsize;
+      if (p + 56 > n) break;
+      var pt = u32(p);
+      if (pt === 3) interp = true;                                   // PT_INTERP
+      if (pt === 0x6474e552) relro = [u64(p + 8), u64(p + 8) + u64(p + 32)]; // PT_GNU_RELRO
+    }
+
+    var strtab = -1;
+    if (shstrndx < shnum && shoff + (shstrndx + 1) * shentsize <= n) strtab = u64(shoff + shstrndx * shentsize + 24);
+    function secName(o, idx) {
+      if (strtab < 0) return "section " + idx;
+      var s = "";
+      for (var q = strtab + o; q < n && b[q] && s.length < 64; q++) s += String.fromCharCode(b[q]);
+      return s || "section " + idx;
+    }
+    for (k = 1; k < shnum; k++) {
+      var h = shoff + k * shentsize;
+      if (h + 64 > n) break;
+      var st = u32(h + 4), flags = u32(h + 8), off = u64(h + 24), size = u64(h + 32);
+      if (st === 0 || st === 8 || !size) continue;                   // SHT_NULL, SHT_NOBITS: no bytes in the file
+      var name = secName(u32(h), k), cat;
+      if (flags & 4) cat = "code";                                   // SHF_EXECINSTR
+      else if (/^\.eh_frame/.test(name)) cat = "unwind";
+      else if (!(flags & 2)) cat = "head";                           // not SHF_ALLOC: names and notes, never loaded
+      else if (relro && off >= relro[0] && off < relro[1]) cat = "reloc";
+      else if ([3, 4, 5, 6, 9, 11, 0x6ffffff6].indexOf(st) >= 0) cat = "reloc"; // dynamic tables, symbols, relocations
+      else if (flags & 1) cat = "data";                              // SHF_WRITE
+      else cat = "rodata";
+      add(off, size, name, cat);
+    }
+
+    regions.sort(function (x, y) { return x.start - y.start || y.end - x.end; });
+    var out = [], at = 0;
+    regions.forEach(function (r) {
+      if (r.end <= at) return;
+      if (r.start > at) out.push({ start: at, end: r.start, name: "padding", cat: "pad" });
+      out.push({ start: Math.max(r.start, at), end: r.end, name: r.name, cat: r.cat });
+      at = r.end;
+    });
+    if (at < n) out.push({ start: at, end: n, name: "padding", cat: "pad" });
+
+    var kind = type === 3 ? (interp ? "PIE" : "static PIE") : type === 2 ? "executable" : "type " + type;
+    var arch = machine === 0xb7 ? "AArch64" : "machine 0x" + machine.toString(16);
+    return { regions: out, summary: "ELF64 · " + arch + " · " + kind };
+  }
+
+  var elf = null;
+  try { elf = parseElf(bytes); } catch (e) { elf = null; }
+  var regions = elf ? elf.regions : [{ start: 0, end: N, name: "data", cat: "rodata" }];
+  var fmt = function (x) { return x.toLocaleString("en-US"); };
+
+  // One pixel per byte; the canvas is as close to square as the length allows.
+  var W = Math.ceil(Math.sqrt(N)), H = Math.ceil(N / W);
+  canvas.width = W; canvas.height = H;
+  canvas.style.aspectRatio = W + " / " + H;
+  canvas.setAttribute("aria-label", "Every byte of /bin/kcontaineros, " + fmt(N) + " in total, drawn as one pixel each and coloured by the part of the file it belongs to");
+  document.getElementById("map-meta").textContent = (elf ? elf.summary + " · " : "") + fmt(N) + " bytes";
+
+  var catOf = new Uint8Array(N), catKeys = Object.keys(CATS), totals = {}, sections = {};
+  regions.forEach(function (r) {
+    var c = catKeys.indexOf(r.cat);
+    for (var j = r.start; j < r.end; j++) catOf[j] = c;
+    totals[r.cat] = (totals[r.cat] || 0) + (r.end - r.start);
+    (sections[r.cat] = sections[r.cat] || []).indexOf(r.name) < 0 && sections[r.cat].push(r.name);
+  });
+
+  function rgb(name) {
+    var v = getComputedStyle(document.documentElement).getPropertyValue(name).trim().replace("#", "");
+    if (v.length === 3) v = v[0] + v[0] + v[1] + v[1] + v[2] + v[2];
+    return [parseInt(v.slice(0, 2), 16), parseInt(v.slice(2, 4), 16), parseInt(v.slice(4, 6), 16)];
+  }
+  var ctx = canvas.getContext("2d");
+  function draw() {
+    var zero = rgb("--px-zero"), cols = catKeys.map(function (k) { return rgb(CATS[k].color); });
+    var img = ctx.createImageData(W, H), d = img.data;
+    for (var j = 0; j < W * H; j++) {
+      var c = zero;
+      if (j < N && bytes[j] !== 0) {
+        var to = cols[catOf[j]], t = 0.3 + 0.7 * bytes[j] / 255;
+        c = [zero[0] + (to[0] - zero[0]) * t, zero[1] + (to[1] - zero[1]) * t, zero[2] + (to[2] - zero[2]) * t];
+      }
+      d[j * 4] = c[0]; d[j * 4 + 1] = c[1]; d[j * 4 + 2] = c[2]; d[j * 4 + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+  draw();
+  try {
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
+    new MutationObserver(draw).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  } catch (e) {}
+
+  // The file's layout in order, then a legend sorted by size.
+  var bar = document.querySelector(".layout"), legend = document.querySelector(".legend");
+  var runs = [];
+  regions.forEach(function (r) {
+    var last = runs[runs.length - 1];
+    if (last && last.cat === r.cat) last.end = r.end;
+    else runs.push({ start: r.start, end: r.end, cat: r.cat });
+  });
+  runs.forEach(function (r) {
+    var s = document.createElement("span");
+    s.className = CATS[r.cat].cls;
+    s.style.flex = (r.end - r.start) + " 1 0";
+    bar.appendChild(s);
+  });
+  Object.keys(totals).sort(function (a, b) { return totals[b] - totals[a]; }).forEach(function (k) {
+    var li = document.createElement("li"), sw = document.createElement("i"), num = document.createElement("span");
+    sw.className = CATS[k].cls;
+    num.textContent = fmt(totals[k]);
+    li.appendChild(sw);
+    li.appendChild(document.createTextNode(CATS[k].label));
+    li.appendChild(num);
+    li.title = sections[k].join(", ");
+    legend.appendChild(li);
+  });
+
+  // The probe: point at a pixel, or focus the picture and use the keys.
+  var probe = document.getElementById("probe"), cursor = document.querySelector(".cursor");
+  var plate = document.querySelector(".plate");
+  var digits = Math.max(4, (N - 1).toString(16).length);
+  function hex(x, w) { var s = x.toString(16); while (s.length < w) s = "0" + s; return s; }
+  function regionAt(off) {
+    for (var j = 0; j < regions.length; j++) if (off >= regions[j].start && off < regions[j].end) return regions[j];
+    return regions[regions.length - 1];
+  }
+  var current = -1;
+  function show(off) {
+    if (off < 0 || off >= N) return;
+    current = off;
+    var r = regionAt(off);
+    probe.innerHTML = "offset <b>0x" + hex(off, digits) + "</b> &nbsp;byte <b>0x" + hex(bytes[off], 2) +
+      "</b><br>" + r.name + " &middot; " + CATS[r.cat].label.toLowerCase();
+    var box = canvas.getBoundingClientRect(), px = box.width / W, sz = Math.max(px, 7);
+    cursor.style.width = cursor.style.height = sz + "px";
+    cursor.style.left = ((off % W) + 0.5) * px - sz / 2 + "px";
+    cursor.style.top = (Math.floor(off / W) + 0.5) * px - sz / 2 + "px";
+    cursor.hidden = false;
+  }
+  function fromPointer(ev) {
+    var box = canvas.getBoundingClientRect();
+    var x = Math.floor((ev.clientX - box.left) / box.width * W), y = Math.floor((ev.clientY - box.top) / box.height * H);
+    if (x >= 0 && y >= 0 && x < W && y < H) show(y * W + x);
+  }
+  canvas.addEventListener("pointermove", fromPointer);
+  canvas.addEventListener("pointerdown", fromPointer);
+  canvas.addEventListener("keydown", function (ev) {
+    var off = current < 0 ? 0 : current, r = regionAt(off), next = null;
+    switch (ev.key) {
+      case "ArrowRight": next = off + 1; break;
+      case "ArrowLeft": next = off - 1; break;
+      case "ArrowDown": next = off + W; break;
+      case "ArrowUp": next = off - W; break;
+      case "PageDown": next = r.end; break;
+      case "PageUp": next = off > r.start ? r.start : regionAt(Math.max(0, r.start - 1)).start; break;
+      case "Home": next = 0; break;
+      case "End": next = N - 1; break;
+      default: return;
+    }
+    ev.preventDefault();
+    show(Math.min(N - 1, Math.max(0, next)));
+  });
+  canvas.addEventListener("focus", function () { if (current < 0) show(0); });
+
+  probe.textContent = "Point at the picture to read any byte and the part of the file it is in. With the keyboard, focus it and use the arrow keys; Page Up and Page Down move between parts.";
+  plate.hidden = false; probe.hidden = false; bar.hidden = false; legend.hidden = false;
+})();
+</script>
+</body>
+</html>
