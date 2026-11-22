@@ -1,0 +1,5 @@
+# The exact compiler the image is built with. Bump together with the
+# digest in the Dockerfile.
+[toolchain]
+channel = "1.100.0"
+targets = ["aarch64-unknown-none-softfloat"]

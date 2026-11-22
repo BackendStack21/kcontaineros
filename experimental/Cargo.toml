@@ -1,0 +1,34 @@
+[package]
+name = "kcos-bare"
+version = "0.1.0"
+edition = "2021"
+description = "Experimental: a bootloader, a kernel and a first program for ARM64, with no dependencies"
+license = "MIT"
+authors = ["21no.de"]
+
+# No [dependencies]: only `core` from the Rust distribution.
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "boot"
+path = "src/bin/boot.rs"
+
+[[bin]]
+name = "kernel"
+path = "src/bin/kernel/main.rs"
+
+[[bin]]
+name = "init"
+path = "src/bin/init.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+panic = "abort"

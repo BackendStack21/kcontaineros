@@ -606,6 +606,8 @@ wrangler.jsonc    Cloudflare configuration that serves docs/
 AGENTS.md         how to change the project: rules, checks, release steps
 AUDIT.md          summary of the security audit
 audit/            the audit itself: method, findings, harnesses to run it again
+experimental/     kcos-bare, an experiment that is not in the image: a bootloader, a kernel
+                  and a first program that boot in QEMU (see its README)
 tools/update-docs.sh  re-embeds the built binary into docs/index.html and redraws it in the
                   share image (tools/update-og.py); run it after a rebuild
 ```

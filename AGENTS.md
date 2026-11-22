@@ -23,6 +23,8 @@ tools/          mkrootfs.sh (image contents), update-docs.sh and update-og.py (s
 test/           e2e.sh runs suite.sh against real containers; cases/ are shell scripts
 audit/          the security audit: method, findings, harnesses (summary in AUDIT.md)
 docs/           the landing page served at kcos.21no.de
+experimental/   kcos-bare: a bootloader, a kernel and init for QEMU; its own crate,
+                image and checks (`make bare-test`), described in its README
 ```
 
 Three builds come out of the same sources: the full image, the sealed image

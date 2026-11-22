@@ -1,4 +1,4 @@
-.PHONY: build test coverage site-preview site-deploy
+.PHONY: build test coverage bare-build bare-run bare-test site-preview site-deploy
 
 build:
 	docker build --platform linux/arm64 -t kcontaineros .
@@ -10,6 +10,16 @@ test:
 # The same tests against an instrumented build; fails under 99% line coverage.
 coverage:
 	COV=1 ./test/e2e.sh
+
+# The experiment in experimental/: a bootloader, a kernel and init, in QEMU.
+bare-build:
+	docker build -t kcos-bare experimental
+
+bare-run: bare-build
+	docker run -it --rm kcos-bare
+
+bare-test:
+	./experimental/test/run.sh
 
 WRANGLER = 4.166.0
 

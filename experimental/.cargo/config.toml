@@ -1,0 +1,4 @@
+# Bare metal, and no floating point registers: the bootloader runs before
+# anything has enabled them, and the kernel does not save them.
+[build]
+target = "aarch64-unknown-none-softfloat"

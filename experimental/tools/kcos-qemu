@@ -1,0 +1,5 @@
+#!/bin/sh
+# Boot the image in QEMU with the console on this terminal:  kcos-qemu [IMAGE]
+# Ctrl-A X leaves QEMU.
+exec qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a72 -m "${KCOS_RAM:-128}" \
+    -display none -serial mon:stdio -bios "${1:-/kcos.img}"
