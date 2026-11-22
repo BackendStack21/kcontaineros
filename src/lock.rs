@@ -61,6 +61,20 @@ pub unsafe fn lockdown(envp: *const *const u8, full: bool) {
 // ----------------------------------------------------------------- Landlock
 
 const FS_EXECUTE: u64 = 1 << 0;
+const FS_WRITE_FILE: u64 = 1 << 1;
+const FS_READ_FILE: u64 = 1 << 2;
+/// The device nodes a program may open; see `confine_files`.
+const DEVICES: [&[u8]; 9] = [
+    b"/dev/null",
+    b"/dev/zero",
+    b"/dev/full",
+    b"/dev/random",
+    b"/dev/urandom",
+    b"/dev/tty",
+    b"/dev/console",
+    b"/dev/ptmx",
+    b"/dev/termination-log", // a file Kubernetes mounts for the container
+];
 /// Writing to files, and creating or removing anything in a directory.
 const FS_WRITE: u64 = 1 << 1 | 0x1ff << 4;
 /// Moving or linking a file into another directory.
@@ -90,28 +104,66 @@ unsafe fn confine_files(envp: *const *const u8) -> bool {
     if abi < 2 {
         return false;
     }
-    let write = FS_WRITE | if abi >= 3 { FS_TRUNCATE } else { 0 };
-    let ruleset = sys::landlock_create_ruleset(&(FS_EXECUTE | FS_REFER | write));
+    // The first of each, as getenv(3) would find it.
+    let (mut extra, mut devices): (Option<&[u8]>, Option<&[u8]>) = (None, None);
+    let mut e = envp;
+    while !(*e).is_null() {
+        let var = cstr(*e);
+        if extra.is_none() {
+            extra = var.strip_prefix(b"KCOS_EXEC=");
+        }
+        if devices.is_none() {
+            devices = var.strip_prefix(b"KCOS_DEV=");
+        }
+        e = e.add(1);
+    }
+    let (extra, devices) = (extra.unwrap_or(b""), devices.unwrap_or(b""));
+    // An entry that is not a plain absolute path is dropped, and said so.
+    for (name, list) in [(&b"KCOS_EXEC"[..], extra), (b"KCOS_DEV", devices)] {
+        for entry in list.split(|&c| c == b':').filter(|e| !e.is_empty()) {
+            if !absolute_dirs(entry).any(|_| true) {
+                eprint(&[b"kcontaineros: warning: ", name, b": ", entry, b" is not a plain absolute path: ignored\n"]);
+            }
+        }
+    }
+
+    // Reading is confined only when /dev holds more than a container's
+    // usual devices (--privileged, --device): a disk of the host can be
+    // read by anyone its permissions admit, and Landlock is what is left to
+    // say no. Otherwise reads stay as they are, because some filesystems
+    // (host directories shared by Docker Desktop) cannot be matched by any
+    // rule and would become unreadable for nothing.
+    let read = if unusual_devices(devices) { FS_READ_FILE } else { 0 };
+    let truncate = if abi >= 3 { FS_TRUNCATE } else { 0 };
+    let write = FS_WRITE | truncate;
+    // What a rule on a single file, or on a device, can carry.
+    let file = read | FS_WRITE_FILE | truncate;
+    let ruleset = sys::landlock_create_ruleset(&(FS_EXECUTE | FS_REFER | read | write));
     if ruleset < 0 {
         return false;
     }
     let ruleset = ruleset as i32;
 
-    let mut extra: &[u8] = b"";
-    let mut e = envp;
-    while !(*e).is_null() {
-        if let Some(dirs) = cstr(*e).strip_prefix(b"KCOS_EXEC=") {
-            extra = dirs;
-        }
-        e = e.add(1);
-    }
-
+    let root = sys::geteuid() == 0;
     allow(ruleset, b"/", FS_REFER);
-    for dir in absolute_dirs(EXEC_DIRS).chain(absolute_dirs(extra)) {
+    for dir in absolute_dirs(EXEC_DIRS) {
         allow(ruleset, dir, FS_EXECUTE);
     }
-    // Every top-level directory that holds no programs stays writable.
-    let slash = sys::open(b"/\0".as_ptr(), sys::O_RDONLY | sys::O_DIRECTORY, 0) as i32;
+    for dir in absolute_dirs(extra) {
+        // Not where the kernel keeps its own files: /dev/shm has to stay
+        // writable, and so could then be run from.
+        let kernel = [&b"/dev"[..], b"/proc", b"/sys"]
+            .iter()
+            .any(|k| dir.starts_with(k) && matches!(dir.get(k.len()), None | Some(b'/')));
+        if kernel {
+            eprint(&[b"kcontaineros: warning: KCOS_EXEC: ", dir, b" cannot hold programs: ignored\n"]);
+        } else if !allow(ruleset, dir, FS_EXECUTE) {
+            eprint(&[b"kcontaineros: warning: KCOS_EXEC: ", dir, b" is not a directory (symbolic links are not followed): ignored\n"]);
+        }
+    }
+    // Everything at the top level can be read, and what holds no programs
+    // can be written, with two exceptions.
+    let slash = sys::open(b"/\0".as_ptr(), sys::O_RDONLY | sys::O_DIRECTORY | sys::O_CLOEXEC, 0) as i32;
     let mut buf = [0u8; 4096];
     loop {
         let n = sys::getdents(slash, &mut buf);
@@ -126,40 +178,146 @@ unsafe fn confine_files(envp: *const *const u8) -> bool {
             let name = cstr(buf.as_ptr().add(p + 19));
             path[1..1 + name.len()].copy_from_slice(name);
             let top = &path[..1 + name.len()];
+            p += reclen;
+            // /dev is handled below: under --privileged it holds the host's
+            // disks, and their permissions admit more than root.
+            if matches!(name, b"." | b".." | b"dev") {
+                continue;
+            }
             // "/usr" holds programs if an exec directory is it or is inside it.
             let holds_programs = absolute_dirs(EXEC_DIRS)
                 .chain(absolute_dirs(extra))
                 .any(|d| d.starts_with(top) && matches!(d.get(top.len()), None | Some(b'/')));
-            if name != b"." && name != b".." && !holds_programs {
-                allow(ruleset, top, write);
+            // The files of /proc and /sys belong to root, so with every
+            // capability gone the owner's write permission would still
+            // reach /proc/sys or the sysrq trigger. Not for root, then.
+            let kernel = root && matches!(name, b"proc" | b"sys");
+            let access = read | if holds_programs || kernel { 0 } else { write };
+            // A directory, or else a single file mounted at the top level.
+            // (A regular one: a device node mapped there is not a file to
+            // hand out by default.)
+            if access != 0 && !allow(ruleset, top, access) && is_regular_file(top) {
+                allow_path(ruleset, top, access & file, false);
             }
-            p += reclen;
         }
     }
     sys::close(slash);
+    // What every program expects of /dev, what the container was started
+    // with in KCOS_DEV, and nothing else in it.
+    for device in DEVICES {
+        allow_path(ruleset, device, file, false);
+    }
+    allow(ruleset, b"/dev/pts", file);
+    allow(ruleset, b"/dev/shm", read | write);
+    if read != 0 {
+        allow(ruleset, b"/dev/mqueue", read);
+    }
+    for device in absolute_dirs(devices) {
+        if !(device.starts_with(b"/dev/") && !is_type(device, 0o120000) && allow_path(ruleset, device, file, false)) {
+            eprint(&[b"kcontaineros: warning: KCOS_DEV: ", device, b" is not a device in /dev (symbolic links are not followed): ignored\n"]);
+        }
+    }
 
     let applied = sys::landlock_restrict_self(ruleset) == 0;
     sys::close(ruleset);
     applied
 }
 
-/// Grant `access` beneath `dir`. A path that is missing, or too long to
-/// exist, grants nothing.
-fn allow(ruleset: i32, dir: &[u8], access: u64) {
-    let mut path = [0u8; 4096];
-    if dir.len() >= path.len() {
-        return;
+fn is_regular_file(path: &[u8]) -> bool {
+    is_type(path, 0o100000)
+}
+
+/// True if `path` itself (a link is not followed) has file type `kind`,
+/// one of the S_IF constants.
+fn is_type(path: &[u8], kind: u16) -> bool {
+    let mut z = [0u8; 4096];
+    if path.len() >= z.len() {
+        return false;
     }
-    path[..dir.len()].copy_from_slice(dir);
-    let fd = sys::open(path.as_ptr(), sys::O_PATH | sys::O_CLOEXEC, 0);
-    if fd >= 0 {
-        // struct landlock_path_beneath_attr, packed: u64 rights, i32 fd.
-        let mut rule = [0u8; 12];
-        rule[..8].copy_from_slice(&access.to_ne_bytes());
-        rule[8..].copy_from_slice(&(fd as i32).to_ne_bytes());
-        sys::landlock_add_rule(ruleset, &rule);
+    z[..path.len()].copy_from_slice(path);
+    let mut st = [0u8; 256];
+    // statx: mode is a u16 at offset 28; S_IFMT is 0o170000.
+    sys::statx(z.as_ptr(), true, &mut st) == 0 && u16::from_ne_bytes([st[28], st[29]]) & 0o170000 == kind
+}
+
+/// True if /dev holds anything beyond what Docker puts in every container
+/// and what `KCOS_DEV` names, or cannot be listed at all.
+fn unusual_devices(named: &[u8]) -> bool {
+    const USUAL: [&[u8]; 18] = [
+        b".", b"..", b"null", b"zero", b"full", b"random", b"urandom", b"tty", b"console", b"ptmx",
+        b"pts", b"shm", b"mqueue", b"fd", b"stdin", b"stdout", b"stderr", b"core",
+    ];
+    let dev = sys::open(b"/dev\0".as_ptr(), sys::O_RDONLY | sys::O_DIRECTORY | sys::O_CLOEXEC, 0);
+    if dev < 0 {
+        return true;
+    }
+    let mut buf = [0u8; 4096];
+    let mut unusual = false;
+    loop {
+        let n = sys::getdents(dev as i32, &mut buf);
+        if n <= 0 {
+            unusual |= n < 0;
+            break;
+        }
+        let mut p = 0;
+        while p < n as usize {
+            // struct linux_dirent64 { u64 ino; i64 off; u16 reclen; u8 type; char name[]; }
+            let reclen = u16::from_ne_bytes([buf[p + 16], buf[p + 17]]) as usize;
+            let name = unsafe { cstr(buf.as_ptr().add(p + 19)) };
+            // "/dev/net/tun" in KCOS_DEV accounts for the entry "net".
+            let is_named = absolute_dirs(named).any(|d| {
+                d.strip_prefix(b"/dev/")
+                    .is_some_and(|rest| rest.starts_with(name) && matches!(rest.get(name.len()), None | Some(b'/')))
+            });
+            unusual |= !(USUAL.contains(&name) || name == b"termination-log" || is_named);
+            p += reclen;
+        }
+    }
+    sys::close(dev as i32);
+    unusual
+}
+
+/// Grant `access` beneath `dir`, an absolute path. It is walked one
+/// component at a time without following symbolic links, so a link can
+/// never make a rule land on a directory other than the one named: `/lib`
+/// pointing into `/usr` must not make `/usr/lib` writable. A path that is
+/// missing, is not a directory or leads through a link grants nothing;
+/// returns whether a rule was added.
+fn allow(ruleset: i32, dir: &[u8], access: u64) -> bool {
+    allow_path(ruleset, dir, access, true)
+}
+
+/// `allow` for a path whose last component may be a file (`is_dir` false):
+/// a device node, which takes only the rights that make sense for a file.
+fn allow_path(ruleset: i32, path: &[u8], access: u64, is_dir: bool) -> bool {
+    let dir_flags = sys::O_PATH | sys::O_DIRECTORY | sys::O_NOFOLLOW | sys::O_CLOEXEC;
+    let mut fd = sys::open(b"/\0".as_ptr(), dir_flags, 0);
+    let mut parts = path.split(|&c| c == b'/').filter(|part| !part.is_empty()).peekable();
+    while let Some(part) = parts.next() {
+        if fd < 0 {
+            break;
+        }
+        let flags = if is_dir || parts.peek().is_some() { dir_flags } else { dir_flags & !sys::O_DIRECTORY };
+        let mut name = [0u8; 256];
+        let next = if part.len() < name.len() {
+            name[..part.len()].copy_from_slice(part);
+            sys::openat(fd as i32, name.as_ptr(), flags, 0)
+        } else {
+            -36
+        };
         sys::close(fd as i32);
+        fd = next;
     }
+    if fd < 0 {
+        return false;
+    }
+    // struct landlock_path_beneath_attr, packed: u64 rights, i32 fd.
+    let mut rule = [0u8; 12];
+    rule[..8].copy_from_slice(&access.to_ne_bytes());
+    rule[8..].copy_from_slice(&(fd as i32).to_ne_bytes());
+    let added = sys::landlock_add_rule(ruleset, &rule) == 0;
+    sys::close(fd as i32);
+    added
 }
 
 // ------------------------------------------------------------------ seccomp
@@ -189,6 +347,8 @@ const AUDIT_ARCH_AARCH64: u32 = 0xc000_00b7;
 
 const SYS_PERSONALITY: u32 = 92;
 const SYS_PRCTL: u32 = 167;
+const SYS_SOCKET: u32 = 198;
+const AF_VSOCK: u32 = 40;
 const SYS_CLONE: u32 = 220;
 const SYS_CLONE3: u32 = 435;
 
@@ -266,6 +426,7 @@ const DENIED: &[u32] = &[
     224, // swapon
     225, // swapoff
     262, // fanotify_init
+    460, // lsm_set_self_attr
     // memory placement across NUMA nodes
     235, // mbind
     237, // set_mempolicy
@@ -275,7 +436,7 @@ const DENIED: &[u32] = &[
 ];
 
 fn install_filter(probe: u32) -> bool {
-    let mut prog = [0u64; 26 + 2 * DENIED.len()];
+    let mut prog = [0u64; 31 + 2 * DENIED.len()];
     let fixed = [
         // Only the native ABI: a 32-bit entry would use other numbers.
         ins(LOAD, 0, 0, ARCH),
@@ -310,6 +471,13 @@ fn install_filter(probe: u32) -> bool {
         // "not implemented" makes every libc fall back to clone.
         ins(JEQ, 0, 1, SYS_CLONE3),
         ins(RET, 0, 0, errno(ENOSYS)),
+        // socket: every family but the one that talks to the hypervisor,
+        // which Docker's own filter refuses as well.
+        ins(JEQ, 0, 4, SYS_SOCKET),
+        ins(LOAD, 0, 0, ARG0),
+        ins(JEQ, 0, 1, AF_VSOCK),
+        ins(RET, 0, 0, errno(EPERM)),
+        ins(RET, 0, 0, ALLOW),
     ];
     prog[..fixed.len()].copy_from_slice(&fixed);
     let mut n = fixed.len();

@@ -116,6 +116,14 @@ fn stat_of(path: &[u8], nofollow: bool, fd: Option<i32>) -> Result<Stat, isize> 
     })
 }
 
+/// `p` without its trailing slashes (empty for "/" and "").
+fn trim_slashes(p: &[u8]) -> &[u8] {
+    match p.iter().rposition(|&c| c != b'/') {
+        Some(last) => &p[..=last],
+        None => &p[..0],
+    }
+}
+
 fn stat(path: &[u8], nofollow: bool) -> Result<Stat, isize> {
     stat_of(path, nofollow, None)
 }
@@ -135,14 +143,11 @@ fn pump_between(from: i32, to: i32) -> (isize, bool) {
         if n <= 0 {
             return (n, false);
         }
-        if !write_all(to, &buf[..n as usize]) {
-            return (-5, true);
+        let w = write_err(to, &buf[..n as usize]);
+        if w < 0 {
+            return (w, true);
         }
     }
-}
-
-fn pump(from: i32, to: i32) -> isize {
-    pump_between(from, to).0
 }
 
 fn cat(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
@@ -151,18 +156,22 @@ fn cat(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
     let files: &[Vec<u8>] = if first < a.len() { &a[first..] } else { &stdin };
     let mut rc = 0;
     for f in files {
-        let r = if &f[..] == b"-" {
-            pump(0, 1)
+        let (r, writing) = if &f[..] == b"-" {
+            pump_between(0, 1)
         } else {
             let fd = sys::open(cz(f).as_ptr(), sys::O_RDONLY, 0);
             if fd >= 0 {
-                let r = pump(fd as i32, 1);
+                let r = pump_between(fd as i32, 1);
                 sys::close(fd as i32);
                 r
             } else {
-                fd
+                (fd, false)
             }
         };
+        if writing {
+            // Nothing more can be written: say so once and stop.
+            return fail(b"cat", b"write error", r);
+        }
         if r < 0 {
             rc = fail(b"cat", f, r);
         }
@@ -173,7 +182,9 @@ fn cat(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
 // ---------------------------------------------------------------- chmod
 
 fn chmod(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
-    let first = operands(a);
+    let Some((_, first)) = flags(b"chmod", a, b"") else {
+        return 1;
+    };
     if a.len() < first + 2 {
         eprint(&[b"chmod: usage: chmod OCTAL FILE...\n"]);
         return 1;
@@ -185,6 +196,7 @@ fn chmod(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
     }
     let mode = spec.iter().fold(0, |m, &c| m * 8 + (c - b'0') as usize);
     let mut rc = 0;
+    let first = first + a.get(first + 1).is_some_and(|s| &s[..] == b"--") as usize;
     for f in &a[first + 1..] {
         let r = sys::chmod(cz(f).as_ptr(), mode);
         if r < 0 {
@@ -199,7 +211,9 @@ fn chmod(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
 /// chown UID[:GID] FILE...   Numeric IDs only: there is no user database
 /// worth consulting in an image with two accounts.
 fn chown(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
-    let first = operands(a);
+    let Some((_, first)) = flags(b"chown", a, b"") else {
+        return 1;
+    };
     if a.len() < first + 2 {
         eprint(&[b"chown: usage: chown UID[:GID] FILE...\n"]);
         return 1;
@@ -215,6 +229,7 @@ fn chown(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
         return 1;
     };
     let mut rc = 0;
+    let first = first + a.get(first + 1).is_some_and(|s| &s[..] == b"--") as usize;
     for f in &a[first + 1..] {
         let r = sys::chown(cz(f).as_ptr(), uid, gid);
         if r < 0 {
@@ -254,10 +269,15 @@ fn copy_file(src: &[u8], dst: &[u8]) -> Result<(), Failure> {
         if out < 0 {
             return Err((out, true));
         }
+        // The open was non-blocking only so that a FIFO could not hang it.
+        sys::set_blocking(fd);
         let (r, writing) = pump_between(fd, out as i32);
-        sys::close(out as i32);
+        let closed = sys::close(out as i32);
         if r < 0 {
             return Err((r, writing));
+        }
+        if closed < 0 {
+            return Err((closed, true)); // a write the filesystem had deferred
         }
         Ok(())
     })();
@@ -268,14 +288,25 @@ fn copy_file(src: &[u8], dst: &[u8]) -> Result<(), Failure> {
 fn move_file(src: &[u8], dst: &[u8]) -> Result<(), Failure> {
     let r = sys::rename(cz(src).as_ptr(), cz(dst).as_ptr());
     if r < 0 {
-        return Err((r, false));
+        // "No such file" about a source that exists is about the destination.
+        // So is "is a directory" about a source that is not one.
+        let source = stat(src, true);
+        let at_destination = match r {
+            sys::ENOENT | sys::ENOTDIR => source.is_ok(),
+            sys::EISDIR => source.is_ok_and(|s| s.mode & S_IFMT != S_IFDIR),
+            _ => false,
+        };
+        return Err((r, at_destination));
     }
     Ok(())
 }
 
 /// Shared driver for `cp` and `mv`: SRC... DST, into DST if it is a directory.
 fn transfer(name: &[u8], a: &[Vec<u8>], op: fn(&[u8], &[u8]) -> Result<(), Failure>) -> i32 {
-    let a = &a[operands(a)..];
+    let Some((_, first)) = flags(name, a, b"") else {
+        return 1;
+    };
+    let a = &a[first..];
     let Some((dst, sources)) = a.split_last().filter(|(_, sources)| !sources.is_empty()) else {
         eprint(&[name, b": usage: ", name, b" SRC... DST\n"]);
         return 1;
@@ -286,7 +317,17 @@ fn transfer(name: &[u8], a: &[Vec<u8>], op: fn(&[u8], &[u8]) -> Result<(), Failu
     }
     let mut rc = 0;
     for s in sources {
-        let target = if dir { join(dst, basename(s)) } else { dst.clone() };
+        let target = if dir {
+            // "a/" goes into the directory under the name "a".
+            let leaf = basename(trim_slashes(s));
+            if matches!(leaf, b"" | b"." | b"..") {
+                rc = fail(name, s, -22);
+                continue;
+            }
+            join(dst, leaf)
+        } else {
+            dst.clone()
+        };
         if let Err((e, at_destination)) = op(s, &target) {
             rc = fail(name, if at_destination { &target } else { s }, e);
         }
@@ -304,14 +345,79 @@ fn mv(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
 
 // ------------------------------------------------- echo, env, true, false
 
+/// echo [-neE] [ARG...]   Leading words made only of those letters are
+/// options; `-e` turns on the backslash escapes of POSIX echo.
 fn echo(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
-    let (newline, start) = if a.len() > 1 && &a[1][..] == b"-n" { (false, 2) } else { (true, 1) };
+    let (mut newline, mut escapes, mut start) = (true, false, 1);
+    while let Some(opt) = a.get(start).filter(|s| s.len() > 1 && s[0] == b'-') {
+        if opt[1..].iter().any(|c| !matches!(c, b'n' | b'e' | b'E')) {
+            break;
+        }
+        for &c in &opt[1..] {
+            match c {
+                b'n' => newline = false,
+                b'e' => escapes = true,
+                _ => escapes = false,
+            }
+        }
+        start += 1;
+    }
     let mut o = Out::new(1);
-    for (i, s) in a.iter().skip(start).enumerate() {
+    'args: for (i, s) in a.iter().skip(start).enumerate() {
         if i > 0 {
             o.s(b" ");
         }
-        o.s(s);
+        if !escapes {
+            o.s(s);
+            continue;
+        }
+        let mut k = 0;
+        while k < s.len() {
+            let c = s[k];
+            k += 1;
+            if c != b'\\' || k == s.len() {
+                o.s(&[c]);
+                continue;
+            }
+            let e = s[k];
+            k += 1;
+            let byte = match e {
+                b'n' => b'\n',
+                b't' => b'\t',
+                b'r' => b'\r',
+                b'a' => 7,
+                b'b' => 8,
+                b'e' => 27,
+                b'f' => 12,
+                b'v' => 11,
+                b'\\' => b'\\',
+                b'c' => {
+                    newline = false;
+                    break 'args; // \c: nothing more, not even the newline
+                }
+                b'0' | b'x' => {
+                    // \0NNN octal (up to three digits), \xHH hexadecimal.
+                    let (radix, max) = if e == b'0' { (8, 3) } else { (16, 2) };
+                    let (mut v, mut n) = (0u32, 0);
+                    while n < max && k < s.len() {
+                        let Some(d) = (s[k] as char).to_digit(radix) else { break };
+                        v = v * radix + d;
+                        k += 1;
+                        n += 1;
+                    }
+                    if e == b'x' && n == 0 {
+                        o.s(b"\\x");
+                        continue;
+                    }
+                    v as u8
+                }
+                other => {
+                    o.s(&[b'\\', other]);
+                    continue;
+                }
+            };
+            o.s(&[byte]);
+        }
     }
     if newline {
         o.s(b"\n");
@@ -323,9 +429,22 @@ fn echo(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
 fn env(a: &[Vec<u8>], e: &[Vec<u8>]) -> i32 {
     let mut vars: Vec<Vec<u8>> = e.to_vec();
     let mut i = 1;
-    if a.get(1).is_some_and(|s| &s[..] == b"-i") {
-        vars.clear();
-        i = 2;
+    // env [-i | -] [-u NAME]... [--]
+    while let Some(opt) = a.get(i).filter(|s| s.first() == Some(&b'-')) {
+        i += 1;
+        match &opt[..] {
+            b"--" => break,
+            b"-i" | b"-" => vars.clear(),
+            b"-u" if i < a.len() => {
+                let name = &a[i];
+                vars.retain(|v| !(v.starts_with(name) && v.get(name.len()) == Some(&b'=')));
+                i += 1;
+            }
+            _ => {
+                eprint(&[b"env: invalid option: ", opt, b"\n"]);
+                return 1;
+            }
+        }
     }
     while let Some(eq) = a.get(i).and_then(|s| s.iter().position(|&c| c == b'=')).filter(|&p| p > 0) {
         vars.retain(|v| !v.starts_with(&a[i][..=eq]));
@@ -335,7 +454,7 @@ fn env(a: &[Vec<u8>], e: &[Vec<u8>]) -> i32 {
     if i < a.len() {
         let err = exec(&a[i..], &vars);
         fail(b"env", &a[i], err);
-        return if err == sys::ENOENT { 127 } else { 126 };
+        return if err == sys::ENOENT || err == sys::ENOTDIR { 127 } else { 126 };
     }
     let mut o = Out::new(1);
     for v in &vars {
@@ -371,17 +490,19 @@ fn kill(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
     let mut sig = 15;
     let mut i = 1;
     if a.len() > 1 && a[1].len() > 1 && a[1][0] == b'-' && &a[1][..] != b"--" {
-        let s = &a[1][1..];
+        // -SIGNAL, or -s SIGNAL
+        let two = &a[1][..] == b"-s" && a.len() > 2;
+        let s = if two { &a[2][..] } else { &a[1][1..] };
         let s = s.strip_prefix(b"SIG").unwrap_or(s);
         let named = SIGNALS.iter().find(|(n, _)| *n == s).map(|&(_, v)| v);
         sig = match named.or_else(|| parse_u64(s)) {
             Some(n) if n <= 64 => n,
             _ => {
-                eprint(&[b"kill: invalid signal: ", &a[1], b"\n"]);
+                eprint(&[b"kill: invalid signal: ", &a[1 + two as usize], b"\n"]);
                 return 1;
             }
         };
-        i = 2;
+        i = 2 + two as usize;
     }
     if a.get(i).is_some_and(|s| &s[..] == b"--") {
         i += 1;
@@ -427,7 +548,9 @@ fn ln(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
         sys::link(t.as_ptr(), l.as_ptr())
     };
     if r < 0 {
-        return fail(b"ln", &a[i + 1], r);
+        // A hard link to something that is not there: name what is missing.
+        let missing = !f.contains(&b's') && r == sys::ENOENT && stat(&a[i], true).is_err();
+        return fail(b"ln", &a[if missing { i } else { i + 1 }], r);
     }
     0
 }
@@ -451,19 +574,27 @@ impl Ls {
     }
 
     /// Print one entry; `full` is the path to stat, `name` what to show.
-    fn entry(&mut self, full: &[u8], name: &[u8]) -> i32 {
-        if !self.long {
+    /// `member` is true for a name read from a directory: one that has
+    /// vanished since is skipped, as it would be had it gone a moment sooner.
+    fn entry(&mut self, full: &[u8], name: &[u8], member: bool) -> i32 {
+        if !self.long && member {
             self.name(name);
             self.out.s(b"\n");
             return 0;
         }
         let st = match stat(full, true) {
             Ok(s) => s,
+            Err(e) if member && e == sys::ENOENT => return 0,
             Err(e) => {
                 self.out.flush();
                 return fail(b"ls", full, e);
             }
         };
+        if !self.long {
+            self.name(name);
+            self.out.s(b"\n");
+            return 0;
+        }
         let m = st.mode;
         let mut s = [b'-'; 10];
         // File type from the top four mode bits.
@@ -522,13 +653,17 @@ fn ls(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
                 entries.sort_unstable();
                 for n in &entries {
                     if all || n[0] != b'.' {
-                        rc |= ls.entry(&join(p, n), n);
+                        rc |= ls.entry(&join(p, n), n, true);
                     }
                 }
             }
             // A file, or a symlink that leads nowhere: show the thing itself.
-            Err(e) if e == sys::ENOTDIR || stat(p, true).is_ok_and(|s| s.mode & S_IFMT == S_IFLNK) => {
-                rc |= ls.entry(p, p)
+            Err(e)
+                if e == sys::ENOTDIR
+                    || ((e == sys::ENOENT || e == -40)
+                        && stat(p, true).is_ok_and(|s| s.mode & S_IFMT == S_IFLNK)) =>
+            {
+                rc |= ls.entry(p, p, false)
             }
             Err(e) => {
                 ls.out.flush();
@@ -564,6 +699,14 @@ fn mkdir(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
                 rc = fail(b"mkdir", &d[..k], r);
                 break;
             }
+            // A parent made here must let its owner go on, whatever the umask.
+            if r == 0 && d[k..].iter().any(|&c| c != b'/') {
+                if let Ok(st) = stat(&d[..k], true) {
+                    if st.mode & 0o300 != 0o300 {
+                        sys::chmod(cz(&d[..k]).as_ptr(), (st.mode & 0o7777 | 0o300) as usize);
+                    }
+                }
+            }
         }
     }
     rc
@@ -571,7 +714,11 @@ fn mkdir(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
 
 // ------------------------------------------------------------------- ps
 
-fn ps(_a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+fn ps(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    if a.len() > 1 {
+        eprint(&[b"ps: usage: ps\n"]);
+        return 1;
+    }
     let entries = match read_dir(b"/proc") {
         Ok(x) => x,
         Err(e) => return fail(b"ps", b"/proc", e),
@@ -616,14 +763,23 @@ fn ps(_a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
 
 // ------------------------------------------------------------------ pwd
 
-fn pwd(_a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+fn pwd(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
+    if a.len() > 1 {
+        eprint(&[b"pwd: usage: pwd\n"]);
+        return 1;
+    }
     let mut buf = [0u8; 4096];
     let r = sys::getcwd(&mut buf);
     if r < 0 {
         return fail(b"pwd", b".", r);
     }
     let mut o = Out::new(1);
-    o.s(&buf[..r as usize - 1]);
+    // A directory name is someone else's choice: not raw on a terminal.
+    if sys::isatty(1) {
+        o.safe(&buf[..r as usize - 1]);
+    } else {
+        o.s(&buf[..r as usize - 1]);
+    }
     o.s(b"\n");
     0
 }
@@ -651,26 +807,45 @@ impl Rm {
         if r >= 0 || (r == sys::ENOENT && self.force) {
             return 0;
         }
-        if r != sys::EISDIR || !self.rec {
+        if !self.rec || r == sys::ENOENT || r == sys::ENOTDIR {
             return fail(b"rm", &self.shown, r);
         }
-        if depth == RM_MAX_DEPTH {
-            return fail(b"rm", &self.shown, ETOODEEP);
-        }
+        // Whatever the error, a directory is still emptied as far as it can
+        // be: in a parent that cannot be written the kernel says "permission
+        // denied" before it says "is a directory".
         let flags = sys::O_RDONLY | sys::O_DIRECTORY | sys::O_NOFOLLOW;
         let fd = sys::openat(dirfd, nz.as_ptr(), flags, 0);
         if fd < 0 {
-            return fail(b"rm", &self.shown, fd);
+            return fail(b"rm", &self.shown, if r == sys::EISDIR { fd } else { r });
+        }
+        if depth == RM_MAX_DEPTH {
+            sys::close(fd as i32);
+            return fail(b"rm", &self.shown, ETOODEEP);
         }
         let mut rc = 0;
         let len = self.shown.len();
-        for n in read_dir_fd(fd as i32) {
-            self.shown.push(b'/');
-            self.shown.extend_from_slice(&n);
-            rc |= self.at(fd as i32, &n, depth + 1);
-            self.shown.truncate(len);
+        // A few names at a time: a directory can hold more than memory does.
+        let mut names = Vec::new();
+        loop {
+            match read_dir_some(fd as i32, &mut names) {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(e) => {
+                    rc = fail(b"rm", &self.shown, e);
+                    break;
+                }
+            }
+            for n in names.drain(..) {
+                self.shown.push(b'/');
+                self.shown.extend_from_slice(&n);
+                rc |= self.at(fd as i32, &n, depth + 1);
+                self.shown.truncate(len);
+            }
         }
         sys::close(fd as i32);
+        if rc != 0 {
+            return rc; // already reported; the directory is not empty
+        }
         let r = sys::unlinkat(dirfd, nz.as_ptr(), true);
         if r < 0 {
             rc = fail(b"rm", &self.shown, r);
@@ -691,11 +866,8 @@ fn rm(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
     let mut rc = 0;
     for p in &a[i..] {
         // "/", "." and ".." (with any trailing slashes) are never removed.
-        let trimmed = match p.iter().rposition(|&c| c != b'/') {
-            Some(last) => &p[..=last],
-            None => &p[..0],
-        };
-        if matches!(basename(trimmed), b"" | b"." | b"..") {
+        // (An empty operand is not "/": it is a file that does not exist.)
+        if !p.is_empty() && matches!(basename(trim_slashes(p)), b"" | b"." | b"..") {
             eprint(&[b"rm: refusing to remove ", p, b"\n"]);
             rc = 1;
             continue;
@@ -708,22 +880,52 @@ fn rm(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
 
 // ---------------------------------------------------------------- sleep
 
+/// sleep SECONDS...   Decimal fractions allowed; several operands add up.
 fn sleep(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
-    let s: &[u8] = a.get(1).map_or(b"", |s| &s[..]);
-    let (whole, frac) = match s.iter().position(|&c| c == b'.') {
-        Some(i) => (&s[..i], &s[i + 1..]),
-        None => (s, &s[..0]),
-    };
-    let sec = if whole.is_empty() && !frac.is_empty() { Some(0) } else { parse_u64(whole) };
-    let (Some(sec), true) = (sec, frac.iter().all(u8::is_ascii_digit)) else {
-        eprint(&[b"sleep: invalid time interval: ", s, b"\n"]);
+    let first = operands(a);
+    if first >= a.len() {
+        eprint(&[b"sleep: usage: sleep SECONDS...\n"]);
         return 1;
-    };
-    // Nanoseconds from up to nine fractional digits.
-    let ns = (0..9).fold(0, |ns, k| ns * 10 + frac.get(k).map_or(0, |&c| (c - b'0') as u64));
-    let r = sys::nanosleep(sec, ns);
+    }
+    let (mut total, mut total_ns) = (0u64, 0u64);
+    for arg in &a[first..] {
+        if matches!(&arg[..], b"infinity" | b"inf") {
+            loop {
+                sys::nanosleep(1 << 30, 0);
+            }
+        }
+        // A unit may follow: s (the default), m, h or d.
+        let unit = match arg.last() {
+            Some(b'm') => 60,
+            Some(b'h') => 3600,
+            Some(b'd') => 86400,
+            _ => 1,
+        };
+        let s = match arg.last() {
+            Some(b's' | b'm' | b'h' | b'd') if arg.len() > 1 => &arg[..arg.len() - 1],
+            _ => &arg[..],
+        };
+        let (whole, frac) = match s.iter().position(|&c| c == b'.') {
+            Some(i) => (&s[..i], &s[i + 1..]),
+            None => (&s[..], &s[..0]),
+        };
+        let sec = if whole.is_empty() && !frac.is_empty() { Some(0) } else { parse_u64(whole) };
+        // Nanoseconds from up to nine fractional digits.
+        let ns = (0..9).fold(0, |ns, k| ns * 10 + frac.get(k).map_or(0, |&c| (c - b'0').min(9) as u64));
+        let sum = sec.filter(|_| frac.iter().all(u8::is_ascii_digit)).and_then(|sec| {
+            // In nanoseconds times the unit: at most 86400 seconds' worth.
+            let ns = total_ns + ns * unit;
+            total.checked_add(sec.checked_mul(unit)?)?.checked_add(ns / 1_000_000_000).map(|t| (t, ns % 1_000_000_000))
+        });
+        let Some((t, ns)) = sum else {
+            eprint(&[b"sleep: invalid time interval: ", arg, b"\n"]);
+            return 1;
+        };
+        (total, total_ns) = (t, ns);
+    }
+    let r = sys::nanosleep(total, total_ns);
     if r < 0 {
-        return fail(b"sleep", s, r);
+        return fail(b"sleep", &a[first], r);
     }
     0
 }
@@ -731,7 +933,9 @@ fn sleep(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
 // ---------------------------------------------------------------- touch
 
 fn touch(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
-    let first = operands(a);
+    let Some((_, first)) = flags(b"touch", a, b"") else {
+        return 1;
+    };
     if first >= a.len() {
         eprint(&[b"touch: missing file operand\n"]);
         return 1;

@@ -10,7 +10,7 @@
 ## What it is
 
 - `/sbin/init`: PID 1. Forwards signals to the command, reaps zombies, exits with the command's status.
-- `/bin/sh`: a small shell for Dockerfile `RUN`/`CMD` and simple scripts. No `if`, loops, functions, globbing, `$(...)` or here-documents; a script that uses them stops with a syntax error before anything runs.
+- `/bin/sh`: a small shell for Dockerfile `RUN`/`CMD` and simple scripts. No `if`, loops, functions, globbing, `$(...)`, here-documents, `trap` or `read`; a script that uses them stops with a syntax error before anything runs.
 - Utilities: cat chmod chown cp echo env false kill ln ls mkdir mv ps pwd rm sleep touch true uname.
 - A sealed build target (`--target sealed`) contains init only: no shell, no utilities, no writable directory.
 
@@ -20,7 +20,9 @@ Applied by init to itself before it starts the command, enforced by the kernel, 
 
 - `no_new_privs`: setuid binaries and file capabilities grant nothing.
 - No capabilities, even under `--privileged`.
-- Landlock: programs execute only from `/bin`, `/sbin`, `/usr` and directories named in `KCOS_EXEC`, and those cannot be written to. A program written at run time does not run.
+- Landlock: programs execute only from `/bin`, `/sbin`, `/usr` and directories named in `KCOS_EXEC`, and those cannot be written to. A program written at run time cannot be started. Symbolic links are not followed when the rules are set up.
+- Landlock: of `/dev`, only the standard devices (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `console`, the terminals) and `/dev/shm` can be opened, plus devices named in `KCOS_DEV`. Under `--privileged` the host's disks can be neither read nor written.
+- Landlock: root cannot write to `/proc` or `/sys`.
 - seccomp filter: `ptrace`, new namespaces, mounts, `bpf`, `io_uring`, `memfd_create` and similar are refused.
 - The image runs as `nobody` (65534) and its files are read-only.
 
@@ -28,6 +30,8 @@ Applied by init to itself before it starts the command, enforced by the kernel, 
 
 - It is not a guarantee against kernel bugs.
 - It does not limit the network or what can be read; set those with the container runtime.
+- It does not stop a process mapping bytes into its own memory as code; such code cannot become a new program and stays under the same restrictions.
+- Host directories shared by Docker Desktop (macOS, Windows) cannot be written to under init; use a volume.
 - Binaries must be statically linked. There is no package manager.
 - `docker exec`, `--entrypoint` and Dockerfile `RUN` steps start outside init and are not under the Landlock rules or the capability drop.
 - Not tested on Kubernetes, with user namespaces, or with any AI agent framework.

@@ -22,18 +22,26 @@ fn main() {
         let ret = match name.as_str() {
             "memfd_create" => syscall(279, b"x\0".as_ptr() as usize, 0),
             "memfd_secret" => syscall(447, 0, 0),
+            // Give this one last: where it is allowed the process is traced
+            // from then on, and any signal would stop it for a tracer that
+            // never comes.
             "ptrace" => syscall(117, 0 /* PTRACE_TRACEME */, 0),
             "process_vm_readv" => syscall(270, 1, 0),
             "io_uring_setup" => syscall(425, 1, 0),
             "bpf" => syscall(280, 0, 0),
             "userfaultfd" => syscall(282, 0, 0),
             "clone3" => syscall(435, 0, 0),
+            "vsock" => syscall(198, 40 /* AF_VSOCK */, 1 /* SOCK_STREAM */),
+            "socket" => syscall(198, 2 /* AF_INET */, 1),
             // One past the newest system call the filter knows about.
             "newer_than_filter" => syscall(467, 0, 0),
             "clone_newuser" => {
                 let pid = syscall(220, CLONE_NEWUSER | SIGCHLD, 0);
                 if pid == 0 {
                     std::process::exit(0); // the child, if it was allowed
+                }
+                if pid > 0 {
+                    syscall(260, pid as usize, 0); // wait4: its SIGCHLD ends here
                 }
                 pid
             }

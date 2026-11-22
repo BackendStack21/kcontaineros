@@ -15,5 +15,9 @@ coverage:
 site-preview:
 	npx wrangler dev
 
-site-deploy:
+# Refuses to publish a page whose embedded binary is not the one just built:
+# commit what tools/update-docs.sh changed, then deploy.
+site-deploy: build
+	tools/update-docs.sh
+	@git diff --quiet HEAD -- docs/ || { echo "docs/ differs from the last commit: review, commit, then run this again" >&2; exit 1; }
 	npx wrangler deploy

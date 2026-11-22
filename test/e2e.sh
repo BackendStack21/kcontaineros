@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end tests for kContainerOS. Needs Docker on an ARM64 host and python3.
+# End-to-end tests for kContainerOS. Needs Docker on an ARM64 host, python3
+# and curl.
 #
 #   test/e2e.sh          build the image and test it
 #   IMG=name test/e2e.sh build and test under another image name
@@ -30,7 +31,7 @@ D=(--platform "$PLATFORM")
 [ -n "$COV" ] && D+=(-v "$VOL:/cov")
 
 cleanup() {
-  docker ps -aq --filter "name=kcos-.*-$ID" | xargs -r docker rm -f >/dev/null 2>&1
+  docker ps -aq --filter "name=^/kcos-.*-$ID\$" | xargs -r docker rm -f >/dev/null 2>&1
   docker rmi -f "$TEST" "$HTTP" "$REPRO" "$SEALED" "$SEALED-test" >/dev/null 2>&1
   [ -n "$COV" ] && docker volume rm -f "$VOL" >/dev/null 2>&1
 }

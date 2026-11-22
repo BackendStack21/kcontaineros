@@ -13,6 +13,6 @@ echo "$#|[$1]"
 /bb/busybox printf '<%s>' "${@:-dflt}"; echo
 shift
 echo "rc=$?"
-shift nope
+sh -c "shift nope; echo not-reached"
 echo "rc=$?"
 echo ${10} "${0}" | /bb/busybox grep -c params

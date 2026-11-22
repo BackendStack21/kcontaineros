@@ -14,6 +14,11 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$dest"
 cp -R "$here/rootfs/." "$dest/"
 cd "$dest"
+find . -name .DS_Store -exec rm -f {} +
+# One version number, the crate's.
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$here/Cargo.toml" | head -1)
+[ -n "$version" ] || { echo "mkrootfs: no version in Cargo.toml" >&2; exit 1; }
+sed -i "s/@VERSION@/$version/g" etc/os-release
 mkdir -p sbin dev proc sys run usr/bin usr/local/bin var
 ln -s ../run var/run
 if [ -n "$sealed" ]; then
@@ -28,6 +33,8 @@ else
         ln -s kcontaineros "bin/$a"
     done
     ln -s ../bin/kcontaineros sbin/init
+    # Where `#!/usr/bin/env sh` looks for it.
+    ln -s ../../bin/kcontaineros usr/bin/env
 fi
 
 # Nothing in the image is writable, not even by its owner, except the two

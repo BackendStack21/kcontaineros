@@ -14,10 +14,8 @@ builtin prefix persists: kept
 traced a b c d e f g
 + K=t true
 + set +x
-sh: set: only -e and -x are supported
-rc=2
-sh: unsupported option: -z (only -e and -x)
-rc=2
+2: two words
+1: three
 builtin-fallback
 nested-fallback
 sh: nope: not found

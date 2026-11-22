@@ -6,16 +6,16 @@ Site: <https://kcos.21no.de> · Source: <https://github.com/BackendStack21/kcont
 
 The whole userland is one static binary of under 100 kB with no libc, no
 `std` and no crates. It talks to the Linux kernel through raw syscalls. The
-Docker image is about 200 kB and contains nothing else except four small
+Docker image is under 250 kB and contains nothing else except four small
 files in `/etc`.
 
 | Path | Role |
 | --- | --- |
-| `/sbin/init` | PID 1: forwards every signal to your command, reaps zombies, exits with your command's status. Never allocates, never polls. |
+| `/sbin/init` | PID 1: forwards every signal to your command, reaps zombies, exits with your command's status. Never allocates; as PID 1 it never polls. |
 | `/bin/sh` | A small shell, enough for Dockerfile `RUN`/`CMD` shell form, simple entrypoint scripts and `docker exec -it … sh`. |
 | `/bin/*` | `cat chmod chown cp echo env false kill ln ls mkdir mv ps pwd rm sleep touch true uname` |
 
-All of them are symlinks to `/bin/kcontaineros`.
+All of them are symlinks to `/bin/kcontaineros`, and so is `/usr/bin/env`.
 
 ## Use
 
@@ -42,8 +42,13 @@ What to know before you do:
 - **Programs run only from `/bin`, `/sbin` and `/usr`.** Put yours in
   `/usr/local/bin`, or name its directory: `ENV KCOS_EXEC=/app`. Whatever
   directory holds programs cannot be written to at run time, together with
-  the top-level directory it is in. Entries must be plain absolute paths:
-  `/`, a trailing slash and `.` or `..` components are ignored.
+  the top-level directory it is in. Entries must be plain absolute paths
+  to real directories: `/`, a trailing slash, `.` or `..` components and
+  anything reached through a symbolic link are ignored, with a warning. The
+  top-level directory of an ignored entry is not writable all the same.
+- **Only the standard devices can be opened**: `null`, `zero`, `full`,
+  `random`, `urandom`, `tty`, `console`, the terminals and `/dev/shm`. A
+  device passed with `--device` has to be named: `ENV KCOS_DEV=/dev/fuse`.
 - **`memfd_create` is refused.** A few runtimes use it for JIT code or
   sealed memory; they need another base image.
 - **Your command holds no capabilities**, whatever `--cap-add` or
@@ -65,7 +70,7 @@ See `examples/hello-http` for a complete image.
 docker build --platform linux/arm64 --target sealed -t kcontaineros:sealed .
 ```
 
-`kcontaineros:sealed` is init and nothing else: under 100 kB, no shell, no
+`kcontaineros:sealed` is init and nothing else: about 100 kB, no shell, no
 utilities, no writable directory. The binary is built without the shell and
 utility code, so there is none to reach by renaming it. Use it for the final
 stage when your image needs no `RUN` steps:
@@ -88,8 +93,10 @@ inherits them. None can be undone from inside.
 | --- | --- | --- |
 | No privilege gain | `no_new_privs` | setuid binaries and file capabilities grant nothing. |
 | No capabilities | bounding, ambient and process sets emptied | Root in the container is an ordinary user to the kernel, even under `--privileged`. |
-| Run or write, never both | Landlock, plus the filter for memory files | Programs execute only from the image's program directories, and those cannot be written to, whatever the file permissions. A binary dropped in `/tmp` or on a volume does not run, and memory files (`memfd_create`) cannot be created at all. |
-| Reduced kernel surface | seccomp filter, on top of Docker's | `ptrace`, reading or writing another process's memory, new namespaces, mounts, `chroot`, kernel modules, `bpf`, `io_uring`, `perf`, keyrings, clock and hostname changes, and switching off address randomisation are refused. System calls newer than the filter knows are answered "not implemented". |
+| Run or write, never both | Landlock, plus the filter for memory files | Programs are started only from the image's program directories, and nothing can be created, removed or written in those, whatever the file permissions. A binary dropped in `/tmp` or on a volume cannot be started, and memory files (`memfd_create`) cannot be created at all. Symbolic links are never followed when the rules are set up, so a link cannot turn a program directory into a writable one. |
+| Only the standard devices | Landlock | Of `/dev`, a program can open `null`, `zero`, `full`, `random`, `urandom`, `tty`, `console`, the terminals in `/dev/pts`, and `/dev/shm`. Nothing else, for reading or for writing, whatever the device's permissions say: under `--privileged` that is every disk of the host. A device passed with `--device` has to be named: `ENV KCOS_DEV=/dev/fuse`. |
+| The kernel's files are out of reach for root | Landlock | Root keeps no capability, but it still owns the files in `/proc` and `/sys`. Under init, root cannot open them for writing: not `/proc/sys`, not the sysrq trigger. |
+| Reduced kernel surface | seccomp filter, on top of Docker's | `ptrace`, reading or writing another process's memory, new namespaces, mounts, `chroot`, kernel modules, `bpf`, `io_uring`, `perf`, keyrings, clock and hostname changes, sockets to the hypervisor (`AF_VSOCK`), and switching off address randomisation are refused. System calls newer than the filter knows are answered "not implemented". |
 | Nothing to tamper with | image files are read-only and owned by root; default user is `nobody` | The image cannot be modified by the default user. |
 | PID 1 is opaque | not dumpable | Other processes cannot read its memory or environment. |
 
@@ -118,6 +125,35 @@ What this does not give you. No image can make these claims honestly:
   code execution inside your server can use what your server can reach:
   its files, its network, its memory. The restrictions stop them going
   further, not from being there.
+- **"Cannot run" means "cannot be started as a program".** A process can
+  still map bytes into its own memory as executable code and jump to them;
+  neither Landlock nor the filter prevents that, because every dynamic
+  loader and JIT does the same. Such code runs inside the process it was
+  loaded into, under every restriction above, and cannot become a new
+  program. Mount writable directories `noexec` (Docker's `--tmpfs` does by
+  default) to stop files there being mapped as code.
+- **As root, a program cannot write to `/proc` or `/sys` at all**, its own
+  `/proc/self/oom_score_adj` included. Run as a non-root user, the default,
+  and ordinary file permissions apply there instead.
+- **The rules go by where things are mounted when init starts.** They
+  assume the usual layout, and a container started otherwise gets less:
+  a device node outside `/dev` (mapped there with `--device
+  /dev/x:/data/x`, or on a volume mounted without `nodev`) is an ordinary
+  file; a `/proc` or `/sys` mounted somewhere else is an ordinary
+  directory; and one volume mounted both inside a program directory and
+  somewhere writable can be written through the second path and run
+  through the first. Mount a volume in one place.
+- **Root can still change the permissions and timestamps of files it
+  owns**, in program directories too. It cannot change what is in them.
+- **A dynamic loader you ship is a program that loads programs.** Copy in
+  `ld-musl` or `ld-linux` and it will map and run a binary from any
+  directory not mounted `noexec`, as it does with every shared library.
+- **Host directories shared by Docker Desktop** (a bind mount from macOS or
+  Windows) can be read but not written to, and programs in them cannot be
+  started: their filesystem cannot be matched by any Landlock rule. When
+  `/dev` holds anything beyond the standard entries and what `KCOS_DEV`
+  names (`--privileged`, an unnamed `--device`, a mount under `/dev`), they
+  cannot be read either. Use a volume. Bind mounts on a Linux host are not affected.
 - **Processes of the same user can write each other's memory through
   `/proc/PID/mem`** unless the host enables Yama. Run one service per
   container.
@@ -133,26 +169,31 @@ What this does not give you. No image can make these claims honestly:
 - **On kernels without Landlock** (before 5.19, or with it disabled) init
   prints a warning and the run-or-write rule is not enforced. Everything
   else is; if the filter itself cannot be installed, init refuses to start.
-- **Started as non-root, init cannot empty the capability bounding set.**
-  It does not matter: with `no_new_privs` nothing can draw on it.
+- **Started as non-root, or as root without `CAP_SETPCAP`, init cannot
+  empty the capability bounding set.** It does not matter: with
+  `no_new_privs` nothing can draw on it.
 - No stack protector or branch protection (BTI/PAC): both need a nightly
   compiler for this target. The unwind tables of the prebuilt `core`
   library (unused) are still in the binary for the same reason.
 - User-namespace remapping has not been tested.
 
-Behaviour of the tools that was hardened after adversarial review:
+How the tools behave where it matters:
 
 - `rm -r` walks the tree through directory descriptors opened without
   following symlinks, so a symlink swapped in during the walk cannot send it
-  elsewhere. It refuses `/`, `.` and `..`, and trees deeper than 4096 levels.
+  elsewhere. It refuses `/`, `.` and `..`, and trees deeper than 4096 levels
+  or than the limit on open files allows. What it cannot remove it reports
+  once, and it still empties a directory it is not allowed to delete.
 - `kill` accepts only real process IDs: `0`, `-1` and numbers that would wrap
   around a 32-bit PID are rejected.
 - `cp` never copies setuid, setgid or sticky bits, and refuses to copy a file
   onto itself.
-- `ps` always, and `ls` on a terminal, replace everything but printable
-  ASCII in names with `?`.
+- `ps` always, and `ls` and `pwd` on a terminal, replace everything but
+  printable ASCII in names with `?`. So does every error message that goes
+  to a terminal, from the utilities, the shell and init.
 - The shell rejects what it does not implement instead of running it as
-  something else, and checks a whole script before running its first line.
+  something else, and checks a whole script before running its first line
+  (a script on standard input is checked as it is read).
 - A utility whose output cannot be written (full disk, closed descriptor)
   exits with status 1.
 
@@ -166,9 +207,9 @@ refused by the kernel, not by instructions the model is asked to follow.
 
 | What a hijacked agent might try | What happens |
 | --- | --- |
-| Fetch a program and run it | Nothing written at run time can be executed: not from `/tmp`, not from a volume, not from memory. |
+| Fetch a program and run it | Nothing written at run time can be started as a program: not from `/tmp`, not from a volume, not from a memory file. |
 | Become root, or use root | No capabilities and `no_new_privs`: there is nothing to escalate to. |
-| Replace its own tools | Program directories cannot be written to while the container runs. |
+| Replace its own tools | Nothing running under init can write to a program directory. |
 | Go after the kernel | New namespaces, mounts, `ptrace`, `bpf`, `io_uring` and similar are refused. |
 | Use what is lying around | The sealed image has no shell, no interpreter and no package manager. |
 | Keep running after you say stop | `docker stop` reaches the tool server at once, and leftover processes are reaped. |
@@ -186,15 +227,16 @@ mounted, so set those when you run it. A tool server that talks over
 standard input and output needs no network at all:
 
 ```sh
-docker run -i --rm --read-only --network none \
+docker run -i --rm --read-only --network none --ipc none \
     --memory 512m --pids-limit 128 \
     --tmpfs /work:uid=65534,gid=65534,mode=0700 \
     my-agent-tools
 ```
 
 Run that way, a tool server can write its working files to `/work` and
-nowhere else, cannot execute anything it writes there, has no network, and
-holds no privilege.
+nowhere else, cannot start anything it writes there as a program, has no
+network, and holds no privilege. `--ipc none` matters for "nowhere else":
+without it Docker gives every container a writable `/dev/shm` of 64 MB.
 
 What this does not contain:
 
@@ -204,6 +246,9 @@ What this does not contain:
   tool server. Mount only what the tools need.
 - **What your tools do.** A tool that deletes files will delete them for a
   hijacked agent too. The image contains the process, not the purpose.
+- **Machine code loaded into the tool server itself.** A hijacked process
+  can map bytes as code inside its own memory. That code is still the tool
+  server: same restrictions, no new program.
 - **Interpreted code.** Copy in Python, Node or a shell and the agent can
   run any script through it. The run rule stops programs brought in at run
   time, not code fed to an interpreter you shipped. The full image ships a
@@ -212,12 +257,9 @@ What this does not contain:
   dynamically linked tools do not fit. This is for a fixed set of tools
   built as static binaries.
 
-It has not been tested with any agent framework. The behaviour above was
-checked with a stand-in program run under exactly these options.
+It has not been tested with any agent framework.
 
 ## Common questions
-
-Each answer below was checked by running it against the image.
 
 ### How do I get a directory my program can write to?
 
@@ -227,7 +269,8 @@ writing, never both. `/bin`, `/sbin`, `/usr` and anything named in
 directory that exists when the container starts can be, subject to ordinary
 file permissions. Since the image runs as `nobody` (65534), the directory
 also has to belong to that user. Out of the box only `/tmp` and `/var/tmp`
-qualify.
+qualify, plus the `/dev/shm` that Docker mounts in every container unless
+it is started with `--ipc none`.
 
 **A directory in the image.** `WORKDIR` creates it owned by the current
 user, which is `nobody`:
@@ -271,6 +314,11 @@ What cannot be made writable:
 
 - anything under `/bin`, `/sbin`, `/usr` or the top-level directory of a
   `KCOS_EXEC` entry, even as a volume or tmpfs mounted there;
+- a directory inside a program directory, whatever links point at it:
+  `/data -> /usr/share/x` is as read-only as `/usr/share/x`;
+- anything in `/dev` but the standard devices, `/dev/shm` and what
+  `KCOS_DEV` names;
+- for root, `/proc` and `/sys`;
 - `/` itself: `mkdir /new` fails at run time, so create top-level
   directories in the Dockerfile or let a mount create them.
 
@@ -287,11 +335,15 @@ ENV KCOS_EXEC=/app
 ```
 
 Several directories are separated by colons. Each must be a plain absolute
-path. That directory's top-level directory then stops being writable, so a
-program in `/app/bin` cannot keep its data in `/app/data`.
+path to a real directory, with no symbolic link on the way and no trailing
+slash: init prints a warning for an entry it cannot use. That directory's
+top-level directory then stops being writable, so a program in `/app/bin`
+cannot keep its data in `/app/data`. Nothing in `/dev`, `/proc` or `/sys`
+can be a program directory.
 
 A program that is dynamically linked fails differently, with "no such file
-or directory": its loader is missing. Build it statically.
+or directory" ("not found" from the shell): its loader is missing. Build it
+statically.
 
 ### A `RUN` step in my Dockerfile fails with "permission denied".
 
@@ -306,10 +358,23 @@ USER 65534:65534
 
 `COPY` and `WORKDIR` need no switch.
 
+### How do I use a device passed with `--device`?
+
+Name it, in the Dockerfile or when starting the container:
+
+```sh
+docker run --device /dev/fuse -e KCOS_DEV=/dev/fuse my-image
+```
+
+Several devices are separated by colons. Without the name the device is
+there but cannot be opened. Ordinary permissions still apply on top, so a
+non-root user may need the device's group: `--group-add`.
+
 ### Does my program need root? What about port 80?
 
 No. Under init even root holds no capabilities, so running as root gains
-almost nothing and gives up the protection of the read-only image. Ports
+almost nothing, gives up the protection of the read-only image, and loses
+the ability to write anything in `/proc` and `/sys`. Ports
 below 1024 work for any user, because Docker makes them unprivileged inside
 a container. `--cap-add` and `--privileged` have no effect on the command.
 
@@ -335,9 +400,11 @@ get files out and `docker logs` to see output.
 
 ### Can I use my existing entrypoint script?
 
-Only if it stays within the shell's subset: commands, variables, pipes,
-`&&` and `||`, redirections. A script with `if`, loops, `$(…)`, `[` or
-globs stops with a syntax error before its first command runs. Either put
+Only if it stays within the shell's subset: commands, variables with
+`${NAME:-default}`, pipes, `&&` and `||`, `&` and `wait`, redirections,
+`cd`, `export`, `umask`, `set --`, `exec`. A script with `if`, loops, `$(…)`, `[`,
+globs, `trap`, `read`, `.` or `${NAME:?}` stops with a syntax error before
+its first command runs. Either put
 the logic in your program, or call the program directly:
 
 ```dockerfile
@@ -377,29 +444,33 @@ that is reasoning, not a result.
 | Platform | linux/arm64 | Yes | The only supported architecture. |
 | Platform | linux/amd64 and others | No | `docker build` stops with an error. |
 | Docker | `docker run`, `exec`, `stop`, `kill`, `--init` | Yes | Covered by `test/e2e.sh`. |
-| Docker | `-it` interactive terminal | Yes | Prompt, Ctrl-C, Ctrl-D. Ctrl-Z has no effect: nothing could resume the job. |
+| Docker | `-it` interactive terminal | Yes | Prompt, Ctrl-C, Ctrl-D. Ctrl-Z has no effect on the command init started: nothing could resume it. A child of that command that leaves Ctrl-Z at its default is stopped as anywhere else, and resuming it is the command's business. |
 | Docker | `FROM kcontaineros` with shell-form `RUN` / `CMD` | Yes | Uses the built-in `/bin/sh`. |
 | Docker | `--read-only`, `--cap-drop ALL`, `--user`, `--security-opt no-new-privileges`, `--memory 8m` | Yes | Tested together. |
 | Docker | `--cap-add`, `--privileged` | No effect | Init drops every capability regardless. |
 | Lockdown | `no_new_privs`, capability drop, seccomp filter, Landlock run-or-write rule | Yes | See Security. Landlock needs kernel 5.19 or later. |
 | Lockdown | Extra program directories | Yes | `ENV KCOS_EXEC=/app:/opt/tool/bin` |
+| Lockdown | Devices beyond the standard ones | Yes | `ENV KCOS_DEV=/dev/fuse:/dev/net/tun`, together with `--device`. |
 | Lockdown | Sealed image without shell or utilities | Yes | `--target sealed` |
 | init | Signal forwarding to the command | Yes | Every catchable signal, sent to the command's PID. |
 | init | Graceful stop of shell-form commands | Yes | The shell replaces itself with the last command, so the signal reaches your program. |
 | init | Zombie reaping | Yes | Orphans are adopted and reaped. |
 | init | Exit status pass-through | Yes | `128 + signal` when the command is killed. |
-| init | Running nested, not as PID 1 | Yes | Adopts orphans, stops what the command left behind (SIGTERM, then SIGKILL after 2 s), hands the terminal back. |
+| init | Running nested, not as PID 1 | Yes | Adopts orphans, stops what the command left behind, in whatever session or process group (SIGTERM, then SIGKILL after 2 s or as soon as init is signalled itself), hands the terminal back. Started as a background job it leaves the terminal alone. |
 | init | Supervising or restarting several services | No | One command; use the shell's `&` and `wait` for more. |
 | Binaries | Statically linked | Yes | Tested with Rust on musl and with busybox. Go with `CGO_ENABLED=0` and Zig produce the same kind of binary but are not in the test suite. |
 | Binaries | Dynamically linked | No | Copy in the loader and libraries yourself. |
-| Shell | Quoting, `$VAR`, `${VAR:-default}`, `$?`, `$$`, `$#`, `"$@"`, `$*`, `$1`..`$9` | Yes | Every variable is exported. |
-| Shell | Pipes, `&&`, `\|\|`, `;`, `&`, `<`, `>`, `>>`, `N>&M`, `N>&-` | Yes | Also on builtins. |
-| Shell | `cd exit export unset exec set shift wait :` | Yes | `set` accepts `-e` and `-x` only. |
-| Shell | Script files, `sh -c`, commands on stdin | Yes | `#!/bin/sh` scripts run. Quoted strings, pipelines and `&&` lists may span lines. A script on stdin stops at its first syntax error. |
+| Shell | Quoting, `$VAR`, `${VAR:-default}`, `$?`, `$$`, `$!`, `$#`, `$-`, `"$@"`, `$*`, `$1`..`$9` | Yes | Every variable is exported. A default may contain further `$` expansions but no quotes and no `$@`. Unquoted expansions are split on whitespace and never globbed; `IFS` cannot be changed. |
+| Shell | Pipes, `&&`, `\|\|`, `;`, `&`, `<`, `>`, `>>`, `N>&M`, `N>&-` | Yes | Also on builtins. `a && b &` runs the whole list in the background. A background command reads from `/dev/null`. |
+| Shell | `cd exit export unset exec set shift wait umask command :` | Yes | `set` accepts `-e`, `-x` and `-- ARGS`; `umask` octal masks only; `command` is `command -v NAME` or `command NAME ARGS`. `--` ends a builtin's options. An option a builtin does not have is an error: `export`, `unset`, `set` and `shift` end the script, the others fail and it goes on. `cd -`, `cd -P` and `cd -L` work; `cd` sets `PWD` and `OLDPWD` to the physical directory, as `cd -P` does. `wait PID` returns that command's status. |
+| Shell | Script files, `sh -c`, `sh -ec`, commands on stdin | Yes | `#!/bin/sh` scripts run, and so does an executable text file without a `#!` line. Quoted strings, pipelines and `&&` lists may span lines. A script on stdin stops at its first syntax error. |
 | Shell | `if` / `for` / `while` / `case`, functions, `{ }`, `!`, `$(…)`, backticks, here-documents | No | Syntax error; nothing in the script runs. |
+| Shell | `trap`, `eval`, `read`, `.`, `return`, `local`, `readonly`, `alias`, `getopts`, `ulimit`, `type`, `set -u`, `set -o` | No | Syntax error; nothing in the script runs. |
+| Shell | `${VAR:?}`, `${VAR:=x}`, `${VAR:+x}`, `${#VAR}`, `${VAR%x}`, `${VAR#x}` and the other `${…}` operators | No | Syntax error; nothing in the script runs. |
 | Shell | Globbing (`*`, `?`, `[`) and `~` | No | Syntax error when unquoted; quote them to pass them literally. |
+| Shell | `&>file`, `$'…'` | No | Syntax error; write `>file 2>&1`. |
 | Shell | `[` and `test` | No | There is no such command. |
-| Utilities | `cat chmod chown cp echo env false kill ln ls mkdir mv ps pwd rm sleep touch true uname` | Yes | Common flags only, such as `ls -la`, `rm -rf`, `mkdir -p`, `ln -s`, `chown UID:GID`, `env -i NAME=value command`. `--` ends options. |
+| Utilities | `cat chmod chown cp echo env false kill ln ls mkdir mv ps pwd rm sleep touch true uname` | Yes | Common flags only, such as `ls -la`, `rm -rf`, `mkdir -p`, `ln -s`, `chown UID:GID`, `env -i -u NAME NAME=value command`, `echo -ne`, `kill -s TERM`, `sleep 1.5`, `sleep 2m`, `sleep infinity`. `--` ends options; an unknown option is an error. `mv` does not cross filesystems. |
 | Utilities | `cp -r`, `chmod u+x`, `grep`, `sed`, `tar`, `wget` and the rest | No | |
 | System | Package manager | No | Add files with `COPY`. |
 | System | CA certificates, timezone data, `/etc/services` | No | Copy them in if needed. |
@@ -409,14 +480,14 @@ that is reasoning, not a result.
 ## Compared with Alpine
 
 Alpine is the usual small base image, so it is the natural reference. Both
-were measured on the same machine: Alpine 3.24.4 and kContainerOS 0.1.0 on
+were measured on the same machine: Alpine 3.24.4 and kContainerOS 0.2.0 on
 Docker 29.9.3, linux/arm64.
 
 | | kContainerOS | Alpine 3.24 |
 | --- | --- | --- |
-| Image size (`docker images`) | 200 kB | 13.6 MB |
-| Root filesystem layer | 156 kB | 9.31 MB |
-| Userland | one 68 kB Rust binary | busybox, 919 kB |
+| Image size (`docker images`) | 239 kB | 13.6 MB |
+| Root filesystem layer | 180 kB | 9.31 MB |
+| Userland | one 90 kB Rust binary | busybox, 919 kB |
 | Utilities | 19, plus `sh` and `init` | 304 busybox applets |
 | C library | none | musl, 723 kB |
 | Package manager | none | `apk`, 16 packages installed |
@@ -431,7 +502,7 @@ Docker 29.9.3, linux/arm64.
 
 What the numbers mean:
 
-- **Size.** kContainerOS is about 70 times smaller. Either way the base is
+- **Size.** kContainerOS is more than 50 times smaller. Either way the base is
   small next to most applications, so this matters most when you ship many
   images or pull on slow links.
 - **Stopping.** On Alpine the command is PID 1, and the kernel does not
@@ -440,8 +511,7 @@ What the numbers mean:
   and 10.2 s with `-t 10`. kContainerOS forwards the signal, so the command
   exits at once. `docker run --init` gives Alpine the same behaviour.
 - **Startup.** The difference is within noise. Starting a container is
-  dominated by Docker, not by the image. (Measured before the hardening
-  changes; not re-measured since.)
+  dominated by Docker, not by the image.
 
 Choose kContainerOS when you ship a static binary and want nothing else in
 the image. Choose Alpine when you need packages, a full shell, dynamically
@@ -451,9 +521,9 @@ updates and a community behind it.
 ## Tests and coverage
 
 `make test` builds the image and runs the end-to-end checks in
-`test/suite.sh` against the local Docker daemon. Every check compares
-complete output and the exit status, so a command that fails cannot pass by
-printing nothing. Shell-language cases live in `test/cases/` as a script and
+`test/suite.sh` against the local Docker daemon. It needs an ARM64 host,
+bash, python3 and curl. Checks compare complete output and the exit status
+wherever they can, so a command that fails cannot pass by printing nothing. Shell-language cases live in `test/cases/` as a script and
 its expected output.
 
 `make coverage` runs the same checks against an instrumented build, prints a
@@ -481,7 +551,7 @@ How the measurement works, and what it leaves out:
 - **No CA certificates or timezone data.** Copy them in if your program makes
   TLS connections or needs local time.
 - **The shell is not POSIX-complete.** It has no control flow, functions,
-  globbing, `$(…)` or here-documents, and no `[`. Existing entrypoint scripts
+  globbing, `$(…)`, here-documents, `trap` or `read`, and no `[`. Existing entrypoint scripts
   that use them stop with a syntax error before doing anything. Copy in
   another shell if a script needs more.
 - It is a container userland, not a bootable OS: the kernel comes from the
@@ -499,11 +569,15 @@ src/util.rs       shared helpers
 src/main.rs       entry point (_start), self-relocation, dispatch on argv[0], allocator
 tools/mkrootfs.sh assembles the image's root filesystem
 test/e2e.sh       test runner; test/suite.sh holds the checks, test/cases/ the shell scripts
+test/term.py      test helper that drives a command through a terminal
+test/elf.py       test helper that reads the hardening properties off the binary
 test/probe.rs     test helper that issues the system calls the filter must refuse
 docs/             the site at kcos.21no.de: index.html, 404.html, share image, _headers,
                   robots.txt, sitemap.xml, llms.txt
 wrangler.jsonc    Cloudflare configuration that serves docs/
-tools/update-docs.sh  re-embeds the built binary into docs/index.html; run it after a rebuild
+AGENTS.md         how to change the project: rules, checks, release steps
+tools/update-docs.sh  re-embeds the built binary into docs/index.html and redraws it in the
+                  share image (tools/update-og.py); run it after a rebuild
 ```
 
 ## The site
@@ -513,7 +587,7 @@ Workers static assets as configured in `wrangler.jsonc`.
 
 ```sh
 make site-preview   # npx wrangler dev: serve docs/ locally, headers included
-make site-deploy    # npx wrangler deploy: publish and attach kcos.21no.de
+make site-deploy    # build, re-embed the binary, then npx wrangler deploy
 ```
 
 - `docs/_headers` sets the Content-Security-Policy and the other response
@@ -521,7 +595,8 @@ make site-deploy    # npx wrangler deploy: publish and attach kcos.21no.de
   fonts on `assets.21no.de`.
 - Unknown paths get `docs/404.html` with status 404.
 - After rebuilding the image, run `tools/update-docs.sh` before deploying,
-  so the page embeds the binary you built.
+  so the page embeds the binary you built. `make site-deploy` does it and
+  refuses to publish a page that the script had to change.
 
 ## License
 

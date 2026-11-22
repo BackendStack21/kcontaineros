@@ -8,6 +8,7 @@
 use std::env;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -37,7 +38,17 @@ fn handle(mut stream: TcpStream) {
 
 fn main() {
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-    let listener = TcpListener::bind(format!("0.0.0.0:{port}")).expect("failed to bind");
+    let Ok(number) = port.parse::<u16>() else {
+        eprintln!("hello-http: PORT must be a port number, not {port:?}");
+        process::exit(2);
+    };
+    let listener = match TcpListener::bind(("0.0.0.0", number)) {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("hello-http: cannot listen on :{port}: {e}");
+            process::exit(1);
+        }
+    };
     println!("hello-http listening on :{port}");
 
     for stream in listener.incoming() {
@@ -56,9 +67,14 @@ fn main() {
             respond(&mut stream, "503 Service Unavailable", "busy\n");
             continue;
         }
-        thread::spawn(move || {
+        // `thread::spawn` would panic, and so end the server, when the
+        // process limit is reached. The connection is dropped instead.
+        let worker = thread::Builder::new().spawn(move || {
             handle(stream);
             ACTIVE.fetch_sub(1, Ordering::SeqCst);
         });
+        if worker.is_err() {
+            ACTIVE.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }

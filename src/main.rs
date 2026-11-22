@@ -149,14 +149,15 @@ unsafe fn kcos_main(sp: *const usize) -> ! {
 
 /// The sealed build is PID 1 and nothing else, whatever it is called.
 #[cfg(not(feature = "tools"))]
-unsafe fn dispatch(_argc: usize, argv: *const *const u8, envp: *const *const u8) -> ! {
-    init::run(argv.add(1), envp)
+unsafe fn dispatch(argc: usize, argv: *const *const u8, envp: *const *const u8) -> ! {
+    // Without an argv[0] there is no command either: argv[1] would be envp.
+    init::run(argv.add(argc.min(1)), envp)
 }
 
 #[cfg(feature = "tools")]
 unsafe fn dispatch(argc: usize, argv: *const *const u8, envp: *const *const u8) -> ! {
     let name: &[u8] = if argc > 0 { basename(cstr(*argv)) } else { b"kcontaineros" };
-    if name == b"init" {
+    if name == b"init" && argc > 0 {
         init::run(argv.add(1), envp);
     }
 

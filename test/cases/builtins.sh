@@ -21,8 +21,8 @@ echo traced a b c d e f g
 K=t true
 set +x
 set -e +e
-set nope; echo "rc=$?"
-set -z; echo "rc=$?"
+set -- one "two words"; echo "$#: $2"
+set three; echo "$#: $1"
 PATH=/nonexistent
 echo builtin-fallback
 sh -c "echo nested-fallback"

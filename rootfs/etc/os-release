@@ -1,5 +1,5 @@
 NAME="kContainerOS"
 ID=kcontaineros
-VERSION_ID=0.1.0
-PRETTY_NAME="kContainerOS 0.1.0"
+VERSION_ID=@VERSION@
+PRETTY_NAME="kContainerOS @VERSION@"
 HOME_URL="https://kcos.21no.de"

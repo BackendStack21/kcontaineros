@@ -11,6 +11,9 @@
 #    kcos-faq:end markers from the visible "Common questions" section, so
 #    the two always say the same thing.
 #
+# 3. Redraws the picture of that binary in the share image, docs/og.png
+#    (tools/update-og.py).
+#
 # Run it after every rebuild of the image and after editing the questions.
 # Running it twice changes nothing. Needs docker and python3.
 set -eu
@@ -116,3 +119,6 @@ else:
     print("docs/index.html updated (binary: %d bytes from %s; %d questions)"
           % (len(data), image, len(questions)))
 EOF
+
+# 3. The share image shows the same binary.
+python3 "$here/tools/update-og.py" "$tmp/kcontaineros" "$here/docs/og.png"

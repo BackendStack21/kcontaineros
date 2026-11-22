@@ -46,23 +46,51 @@ pub fn output_failed() -> bool {
     unsafe { OUTPUT_FAILED }
 }
 
-pub fn write_all(fd: i32, mut b: &[u8]) -> bool {
+pub fn write_all(fd: i32, b: &[u8]) -> bool {
+    write_err(fd, b) == 0
+}
+
+/// Write all of `b`. Returns 0, or the negative errno that stopped it.
+pub fn write_err(fd: i32, mut b: &[u8]) -> isize {
     while !b.is_empty() {
         let r = sys::write(fd, b);
         if r <= 0 {
             if fd == 1 {
                 unsafe { OUTPUT_FAILED = true };
             }
-            return false;
+            return if r == 0 { -5 } else { r };
         }
         b = &b[r as usize..];
     }
-    true
+    0
 }
 
-/// Write a message to stderr with one writev(2) per eight parts, so it is
-/// neither truncated nor interleaved with other writers.
+/// Write a message to stderr. Not to a terminal: one writev(2) per eight
+/// parts, so it is neither truncated nor interleaved with other writers.
+/// To a terminal: with everything but printable ASCII replaced by `?`,
+/// because the parts include names taken from arguments, the filesystem
+/// and other processes, and none of those may drive the terminal. A
+/// newline that ends a part is kept. Never allocates: init uses it.
 pub fn eprint(parts: &[&[u8]]) {
+    if sys::isatty(2) {
+        let mut buf = [0u8; 512];
+        let mut n = 0;
+        for (k, part) in parts.iter().enumerate() {
+            for (i, &c) in part.iter().enumerate() {
+                // The newline that ends the message is the only one kept.
+                let last = k + 1 == parts.len() && i + 1 == part.len();
+                let keep = (0x20..0x7f).contains(&c) || (c == b'\n' && last);
+                buf[n] = if keep { c } else { b'?' };
+                n += 1;
+                if n == buf.len() {
+                    sys::write(2, &buf);
+                    n = 0;
+                }
+            }
+        }
+        sys::write(2, &buf[..n]);
+        return;
+    }
     for group in parts.chunks(8) {
         let mut iov = [[0usize; 2]; 8];
         for (slot, part) in iov.iter_mut().zip(group) {
@@ -168,6 +196,7 @@ const ERRORS: &[(isize, &[u8])] = &[
     (2, b"no such file or directory"),
     (3, b"no such process"),
     (5, b"input/output error"),
+    (6, b"no such device or address"),
     (7, b"argument list too long"),
     (8, b"exec format error"),
     (9, b"bad file descriptor"),
@@ -177,16 +206,24 @@ const ERRORS: &[(isize, &[u8])] = &[
     (16, b"device or resource busy"),
     (17, b"file exists"),
     (18, b"cross-device link"),
+    (19, b"no such device"),
     (20, b"not a directory"),
     (21, b"is a directory"),
     (22, b"invalid argument"),
+    (23, b"too many open files in system"),
     (24, b"too many open files"),
     (26, b"text file busy"),
+    (27, b"file too large"),
     (28, b"no space left on device"),
     (30, b"read-only file system"),
+    (31, b"too many links"),
+    (32, b"broken pipe"),
     (36, b"file name too long"),
     (39, b"directory not empty"),
     (40, b"too many levels of symbolic links"),
+    (75, b"value too large"),
+    (116, b"stale file handle"),
+    (122, b"disk quota exceeded"),
     (4000, b"source and destination are the same file"),
     (4001, b"directory tree too deep"),
 ];
@@ -210,6 +247,19 @@ pub unsafe fn execvp(
     path: &[u8],
 ) -> isize {
     let mut buf = [0u8; 4096];
+    execvp_in(file, argv, envp, path, &mut buf)
+}
+
+/// `execvp` with the buffer the candidate paths are built in. When a file
+/// was found but is not a program the kernel can run, the search stops
+/// there with ENOEXEC and `buf` holds that file's path, NUL-terminated.
+pub unsafe fn execvp_in(
+    file: &[u8],
+    argv: *const *const u8,
+    envp: *const *const u8,
+    path: &[u8],
+    buf: &mut [u8; 4096],
+) -> isize {
     if file.is_empty() {
         return sys::ENOENT;
     }
@@ -232,6 +282,9 @@ pub unsafe fn execvp(
         buf[dir.len() + 1..n].copy_from_slice(file);
         buf[n] = 0;
         let e = sys::execve(buf.as_ptr(), argv, envp);
+        if e == sys::ENOEXEC {
+            return e;
+        }
         if e != sys::ENOENT && e != sys::ENOTDIR {
             err = e;
         }
@@ -241,6 +294,18 @@ pub unsafe fn execvp(
 
 /// exec `args` with environment `env`, resolving through `$PATH`.
 pub fn exec(args: &[Vec<u8>], env: &[Vec<u8>]) -> isize {
+    exec_found(args, env, &mut Vec::new())
+}
+
+pub fn is_dir(path: &[u8]) -> bool {
+    let mut st = [0u8; 256];
+    // statx: mode is a u16 at offset 28.
+    sys::statx(cz(path).as_ptr(), false, &mut st) == 0
+        && u16::from_ne_bytes([st[28], st[29]]) & 0o170000 == 0o040000
+}
+
+/// `exec`; on ENOEXEC `found` is the file that could not be run.
+pub fn exec_found(args: &[Vec<u8>], env: &[Vec<u8>], found: &mut Vec<u8>) -> isize {
     let argz: Vec<Vec<u8>> = args.iter().map(|a| cz(a)).collect();
     let envz: Vec<Vec<u8>> = env.iter().map(|e| cz(e)).collect();
     let mut argv: Vec<*const u8> = argz.iter().map(|a| a.as_ptr()).collect();
@@ -248,7 +313,12 @@ pub fn exec(args: &[Vec<u8>], env: &[Vec<u8>]) -> isize {
     argv.push(core::ptr::null());
     envp.push(core::ptr::null());
     let path = getenv(env, b"PATH").unwrap_or(DEFAULT_PATH);
-    unsafe { execvp(&args[0], argv.as_ptr(), envp.as_ptr(), path) }
+    let mut buf = [0u8; 4096];
+    let e = unsafe { execvp_in(&args[0], argv.as_ptr(), envp.as_ptr(), path, &mut buf) };
+    if e == sys::ENOEXEC {
+        found.extend_from_slice(unsafe { cstr(buf.as_ptr()) });
+    }
+    e
 }
 
 pub fn read_file(path: &[u8]) -> Result<Vec<u8>, isize> {
@@ -281,31 +351,37 @@ pub fn read_dir(path: &[u8]) -> Result<Vec<Vec<u8>>, isize> {
     }
     let names = read_dir_fd(fd as i32);
     sys::close(fd as i32);
-    Ok(names)
+    names
 }
 
 /// Like `read_dir`, for a directory that is already open. A directory that
-/// stops being readable part-way simply ends the listing.
-pub fn read_dir_fd(fd: i32) -> Vec<Vec<u8>> {
+/// stops being readable part-way is an error, never a shorter listing.
+pub fn read_dir_fd(fd: i32) -> Result<Vec<Vec<u8>>, isize> {
     let mut out = Vec::new();
+    while read_dir_some(fd, &mut out)? {}
+    Ok(out)
+}
+
+/// Append the next few names of the open directory `fd` to `out`; false at
+/// the end. For callers that must not hold a huge directory in memory.
+pub fn read_dir_some(fd: i32, out: &mut Vec<Vec<u8>>) -> Result<bool, isize> {
     let mut buf = [0u8; 4096];
-    loop {
-        let n = sys::getdents(fd, &mut buf);
-        if n <= 0 {
-            return out;
-        }
-        let mut p = 0;
-        while p < n as usize {
-            // struct linux_dirent64 { u64 ino; i64 off; u16 reclen; u8 type; char name[]; }
-            let reclen = u16::from_ne_bytes([buf[p + 16], buf[p + 17]]) as usize;
-            let raw = &buf[p + 19..p + reclen];
-            let name = &raw[..raw.iter().position(|&c| c == 0).unwrap_or(raw.len())];
-            if name != b"." && name != b".." {
-                out.push(name.to_vec());
-            }
-            p += reclen;
-        }
+    let n = sys::getdents(fd, &mut buf);
+    if n < 0 {
+        return Err(n);
     }
+    let mut p = 0;
+    while p < n as usize {
+        // struct linux_dirent64 { u64 ino; i64 off; u16 reclen; u8 type; char name[]; }
+        let reclen = u16::from_ne_bytes([buf[p + 16], buf[p + 17]]) as usize;
+        let raw = &buf[p + 19..p + reclen];
+        let name = &raw[..raw.iter().position(|&c| c == 0).unwrap_or(raw.len())];
+        if name != b"." && name != b".." {
+            out.push(name.to_vec());
+        }
+        p += reclen;
+    }
+    Ok(n > 0)
 }
 
 /// Translate a wait status into a shell-style exit code.

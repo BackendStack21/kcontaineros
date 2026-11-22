@@ -5,3 +5,8 @@ target/
 .dev.vars*
 !.dev.vars.example
 node_modules/
+
+# local artefacts
+__pycache__/
+*.pyc
+.DS_Store

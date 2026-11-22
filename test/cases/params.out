@@ -11,7 +11,7 @@
 <dflt>
 sh: shift: cannot shift that many
 rc=1
-sh: shift: cannot shift that many
-rc=1
+sh: shift: nope: not a number
+rc=2
 1
 [rc 0]

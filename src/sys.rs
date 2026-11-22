@@ -18,6 +18,7 @@ mod nr {
     pub const UNLINKAT: usize = 35;
     pub const SYMLINKAT: usize = 36;
     pub const LINKAT: usize = 37;
+    pub const FACCESSAT: usize = 48;
     pub const CHDIR: usize = 49;
     pub const FCHMODAT: usize = 53;
     pub const FCHOWNAT: usize = 54;
@@ -39,10 +40,14 @@ mod nr {
     pub const RT_SIGPROCMASK: usize = 135;
     pub const RT_SIGTIMEDWAIT: usize = 137;
     pub const SETPGID: usize = 154;
+    pub const GETPGID: usize = 155;
     pub const UNAME: usize = 160;
+    pub const UMASK: usize = 166;
     pub const PRCTL: usize = 167;
     pub const GETPID: usize = 172;
+    pub const GETPPID: usize = 173;
     pub const GETUID: usize = 174;
+    pub const GETEUID: usize = 175;
     pub const MUNMAP: usize = 215;
     pub const CLONE: usize = 220;
     pub const EXECVE: usize = 221;
@@ -93,6 +98,7 @@ pub const ECHILD: isize = -10;
 pub const EEXIST: isize = -17;
 pub const ENOTDIR: isize = -20;
 pub const EISDIR: isize = -21;
+pub const ENOEXEC: isize = -8;
 
 pub const SIGINT: usize = 2;
 pub const SIGQUIT: usize = 3;
@@ -158,8 +164,16 @@ pub fn kill(pid: isize, sig: usize) -> isize {
     unsafe { sc(nr::KILL, pid as usize, sig, 0, 0, 0, 0) }
 }
 
+pub fn getppid() -> isize {
+    unsafe { sc(nr::GETPPID, 0, 0, 0, 0, 0, 0) }
+}
+
 pub fn getpid() -> isize {
     unsafe { sc(nr::GETPID, 0, 0, 0, 0, 0, 0) }
+}
+
+pub fn geteuid() -> isize {
+    unsafe { sc(nr::GETEUID, 0, 0, 0, 0, 0, 0) }
 }
 
 pub fn getuid() -> isize {
@@ -170,6 +184,11 @@ pub fn getuid() -> isize {
 pub fn sigsetmask(set: &u64, old: Option<&mut u64>) -> isize {
     let old = old.map_or(0, |o| o as *mut u64 as usize);
     unsafe { sc(nr::RT_SIGPROCMASK, 2, set as *const u64 as usize, old, 8, 0, 0) }
+}
+
+/// sigprocmask(SIG_BLOCK, set, old)
+pub fn sigblock(set: &u64, old: &mut u64) -> isize {
+    unsafe { sc(nr::RT_SIGPROCMASK, 0, set as *const u64 as usize, old as *mut u64 as usize, 8, 0, 0) }
 }
 
 /// Wait until one of the signals in `set` is pending and return its number.
@@ -195,6 +214,11 @@ pub fn setpgid(pid: isize, pgid: isize) -> isize {
     unsafe { sc(nr::SETPGID, pid as usize, pgid as usize, 0, 0, 0, 0) }
 }
 
+/// The caller's own process group.
+pub fn getpgid() -> isize {
+    unsafe { sc(nr::GETPGID, 0, 0, 0, 0, 0, 0) }
+}
+
 pub fn ioctl(fd: i32, req: usize, arg: usize) -> isize {
     unsafe { sc(nr::IOCTL, fd as usize, req, arg, 0, 0, 0) }
 }
@@ -206,6 +230,16 @@ pub fn isatty(fd: i32) -> bool {
 
 pub fn prctl(op: usize, arg: usize) -> isize {
     unsafe { sc(nr::PRCTL, op, arg, 0, 0, 0, 0) }
+}
+
+/// Set the file mode creation mask; returns the previous one.
+pub fn umask(mask: usize) -> isize {
+    unsafe { sc(nr::UMASK, mask, 0, 0, 0, 0, 0) }
+}
+
+/// 0 if `path` may be executed by this process.
+pub fn access_x(path: *const u8) -> isize {
+    unsafe { sc(nr::FACCESSAT, CWD, path as usize, 1 /* X_OK */, 0, 0, 0) }
 }
 
 pub fn chdir(path: *const u8) -> isize {
@@ -248,6 +282,11 @@ pub fn mprotect_ro(addr: usize, len: usize) -> isize {
 /// with other writers. `iov` is an array of (pointer, length) pairs.
 pub fn writev(fd: i32, iov: &[[usize; 2]]) -> isize {
     unsafe { sc(nr::WRITEV, fd as usize, iov.as_ptr() as usize, iov.len(), 0, 0, 0) }
+}
+
+/// Clear O_NONBLOCK (and the other status flags) on `fd`.
+pub fn set_blocking(fd: i32) -> isize {
+    unsafe { sc(nr::FCNTL, fd as usize, 4 /* F_SETFL */, 0, 0, 0, 0) }
 }
 
 /// Duplicate `fd` onto the lowest free descriptor >= `min`, close-on-exec.
