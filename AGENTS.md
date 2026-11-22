@@ -167,8 +167,10 @@ image and after editing the questions; running it twice changes nothing.
    README table if the binary changed (`docker images`, `docker history`,
    `wc -c` on the binary).
 4. Commit, push `main`, tag `vX.Y.Z`, push the tag.
-5. `make site-deploy` publishes the page. It rebuilds, runs
-   `tools/update-docs.sh` and refuses to deploy while `docs/` differs from
+5. Pushing `main` deploys the page: what is committed in `docs/` is what
+   goes live. Compare <https://kcos.21no.de> with `docs/index.html`
+   afterwards. `make site-deploy` does the same by hand and needs
+   Cloudflare credentials; it refuses to deploy while `docs/` differs from
    the last commit.
 
 ## Housekeeping

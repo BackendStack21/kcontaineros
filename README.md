@@ -583,20 +583,22 @@ tools/update-docs.sh  re-embeds the built binary into docs/index.html and redraw
 ## The site
 
 `docs/` is the landing page at <https://kcos.21no.de>, served by Cloudflare
-Workers static assets as configured in `wrangler.jsonc`.
+Workers static assets as configured in `wrangler.jsonc`. A push to `main`
+deploys it.
 
 ```sh
 make site-preview   # npx wrangler dev: serve docs/ locally, headers included
-make site-deploy    # build, re-embed the binary, then npx wrangler deploy
+make site-deploy    # deploy by hand: build, re-embed the binary, npx wrangler deploy
 ```
 
 - `docs/_headers` sets the Content-Security-Policy and the other response
   headers. The page makes no request outside its own origin except for the
   fonts on `assets.21no.de`.
 - Unknown paths get `docs/404.html` with status 404.
-- After rebuilding the image, run `tools/update-docs.sh` before deploying,
-  so the page embeds the binary you built. `make site-deploy` does it and
-  refuses to publish a page that the script had to change.
+- After rebuilding the image, run `tools/update-docs.sh` and commit the
+  result before pushing, so the page embeds the binary you built.
+  `make site-deploy` runs it and refuses to publish a page that the script
+  had to change.
 
 ## License
 
