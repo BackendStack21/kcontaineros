@@ -177,7 +177,9 @@ image and after editing the questions; running it twice changes nothing.
 2. `make test` and `make coverage`, both green.
 3. `make build`, then `tools/update-docs.sh`. Re-measure the sizes in the
    README table if the binary changed (`docker images`, `docker history`,
-   `wc -c` on the binary).
+   `wc -c` on the binary). The image size is also in the row of figures
+   at the top of the page; the binary's size there is read from the
+   embedded copy.
 4. Commit, push `main`, tag `vX.Y.Z`, push the tag.
 5. Pushing `main` deploys the page: what is committed in `docs/` is what
    goes live. Compare <https://kcos.21no.de> with `docs/index.html`

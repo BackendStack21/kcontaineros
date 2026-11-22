@@ -14,17 +14,19 @@ import struct
 import sys
 import zlib
 
-ZERO = (0xD9, 0xE0, 0xE7)
-INK = (0x10, 0x20, 0x2E)
+# The --map-* colours of docs/index.html.
+ZERO = (0x0D, 0x10, 0x17)
 COLOURS = {
-    "code": (0xB7, 0x41, 0x0E),
-    "rodata": (0x0C, 0x6B, 0x74),
-    "unwind": (0x7F, 0x93, 0xA8),
-    "reloc": (0x4E, 0x60, 0x74),
-    "data": (0xB7, 0x41, 0x0E),
-    "head": INK,
-    "pad": (0xC3, 0xCD, 0xD7),
+    "code": (0x22, 0xD3, 0xEE),
+    "rodata": (0x8B, 0x5C, 0xF6),
+    "unwind": (0x3B, 0x4A, 0x63),
+    "reloc": (0x64, 0x74, 0x8B),
+    "data": (0x4A, 0xDE, 0x80),
+    "head": (0xFA, 0xFA, 0xFA),
+    "pad": (0x1C, 0x21, 0x30),
 }
+# The colour of the panel's frame, and of nothing else in the image.
+FRAME = (0x2A, 0x32, 0x47)
 
 
 def read_png(path):
@@ -132,18 +134,18 @@ def main():
     # The panel is the framed square in the right half: find the frame's
     # inner edges along the middle row and the panel's middle column.
     mid = height // 2
-    frame = [x for x in range(width // 2, width) if pixel(x, mid) == INK]
+    frame = [x for x in range(width // 2, width) if pixel(x, mid) == FRAME]
     left, right = frame[0], frame[-1]
-    while pixel(left, mid) == INK:
+    while pixel(left, mid) == FRAME:
         left += 1
-    while pixel(right, mid) == INK:
+    while pixel(right, mid) == FRAME:
         right -= 1
     centre = (left + right) // 2
-    edge = [y for y in range(height) if pixel(centre, y) == INK]
+    edge = [y for y in range(height) if pixel(centre, y) == FRAME]
     top, bottom = edge[0], edge[-1]
-    while pixel(centre, top) == INK:
+    while pixel(centre, top) == FRAME:
         top += 1
-    while pixel(centre, bottom) == INK:
+    while pixel(centre, bottom) == FRAME:
         bottom -= 1
 
     n = len(binary)
