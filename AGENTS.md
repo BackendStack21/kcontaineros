@@ -21,6 +21,7 @@ src/applets.rs  utilities
 src/util.rs     shared helpers
 tools/          mkrootfs.sh (image contents), update-docs.sh and update-og.py (site)
 test/           e2e.sh runs suite.sh against real containers; cases/ are shell scripts
+audit/          the security audit of 0.2.0: method, findings, harnesses
 docs/           the landing page served at kcos.21no.de
 ```
 
@@ -98,6 +99,13 @@ in `test/cases/NAME.sh` with the expected output in `NAME.out`.
   Open it for appending and close it (`true >> /proc/sys/...`): if the check
   ever regresses, nothing on the machine running the tests may change. Do
   not open hypervisor sockets or block devices in a control run.
+- Docker hands stdout and stderr over separately. `expect` accepts any
+  merge of the two that keeps each stream whole and in order; do not write
+  a check that depends on which line came first. Do not pin a PID other
+  than 1, and do not read a child's state before it has exec'ed.
+- Never change the clock, the hostname or anything else that is shared
+  with the machine, not in a control run either: call with arguments the
+  kernel refuses (`probe raw:NR`) and compare the error.
 - Keep host specifics out: no fixed device names that only exist on one
   kind of host, no sizes or PIDs that depend on the runtime where it can be
   avoided.
@@ -126,6 +134,10 @@ in `test/cases/NAME.sh` with the expected output in `NAME.out`.
   `ENOSYS` until someone has looked at them.
 - Try to break it afterwards, from inside a container, with a static probe
   (`test/probe.rs`) or busybox.
+- `audit/` holds an end-to-end audit with its harnesses (filter read back
+  from the kernel, access matrix, mutation of the lockdown against the
+  suite). Run the tracks that touch what you changed, and add a mutant
+  when you add a rule: a rule no check notices losing is not tested.
 
 ## Changing the shell or a utility
 

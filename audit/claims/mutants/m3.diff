@@ -1,0 +1,7 @@
+--- a/src/lock.rs
++++ b/src/lock.rs
+@@ -193,3 +193,3 @@
+             // reach /proc/sys or the sysrq trigger. Not for root, then.
+-            let kernel = root && matches!(name, b"proc" | b"sys");
++            let kernel = root && matches!(name, b"proc");
+             let access = read | if holds_programs || kernel { 0 } else { write };

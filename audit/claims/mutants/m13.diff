@@ -1,0 +1,15 @@
+--- a/src/lock.rs
++++ b/src/lock.rs
+@@ -383,5 +383,3 @@
+     39,  // umount2
+-    40,  // mount
+     41,  // pivot_root
+-    51,  // chroot
+     428, // open_tree
+@@ -419,6 +417,3 @@
+     142, // reboot
+-    161, // sethostname
+     162, // setdomainname
+-    112, // clock_settime
+-    170, // settimeofday
+     171, // adjtimex

@@ -76,16 +76,6 @@ fn flags(name: &[u8], a: &[Vec<u8>], allowed: &[u8]) -> Option<(Vec<u8>, usize)>
     Some((f, i))
 }
 
-/// The index of the first operand for applets that take no options: only a
-/// leading `--` is skipped, so a file named `-x` is just a file.
-fn operands(a: &[Vec<u8>]) -> usize {
-    if a.len() > 1 && &a[1][..] == b"--" {
-        2
-    } else {
-        1
-    }
-}
-
 struct Stat {
     mode: u32,
     uid: u32,
@@ -152,7 +142,9 @@ fn pump_between(from: i32, to: i32) -> (isize, bool) {
 
 fn cat(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
     let stdin = [b"-".to_vec()];
-    let first = operands(a);
+    let Some((_, first)) = flags(b"cat", a, b"") else {
+        return 1;
+    };
     let files: &[Vec<u8>] = if first < a.len() { &a[first..] } else { &stdin };
     let mut rc = 0;
     for f in files {
@@ -185,7 +177,9 @@ fn chmod(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
     let Some((_, first)) = flags(b"chmod", a, b"") else {
         return 1;
     };
-    if a.len() < first + 2 {
+    // The files start after the mode, and after a `--` that may follow it.
+    let files = first + 1 + a.get(first + 1).is_some_and(|s| &s[..] == b"--") as usize;
+    if a.len() <= files {
         eprint(&[b"chmod: usage: chmod OCTAL FILE...\n"]);
         return 1;
     }
@@ -196,8 +190,7 @@ fn chmod(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
     }
     let mode = spec.iter().fold(0, |m, &c| m * 8 + (c - b'0') as usize);
     let mut rc = 0;
-    let first = first + a.get(first + 1).is_some_and(|s| &s[..] == b"--") as usize;
-    for f in &a[first + 1..] {
+    for f in &a[files..] {
         let r = sys::chmod(cz(f).as_ptr(), mode);
         if r < 0 {
             rc = fail(b"chmod", f, r);
@@ -214,7 +207,9 @@ fn chown(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
     let Some((_, first)) = flags(b"chown", a, b"") else {
         return 1;
     };
-    if a.len() < first + 2 {
+    // The files start after the owner, and after a `--` that may follow it.
+    let files = first + 1 + a.get(first + 1).is_some_and(|s| &s[..] == b"--") as usize;
+    if a.len() <= files {
         eprint(&[b"chown: usage: chown UID[:GID] FILE...\n"]);
         return 1;
     }
@@ -229,8 +224,7 @@ fn chown(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
         return 1;
     };
     let mut rc = 0;
-    let first = first + a.get(first + 1).is_some_and(|s| &s[..] == b"--") as usize;
-    for f in &a[first + 1..] {
+    for f in &a[files..] {
         let r = sys::chown(cz(f).as_ptr(), uid, gid);
         if r < 0 {
             rc = fail(b"chown", f, r);
@@ -457,8 +451,13 @@ fn env(a: &[Vec<u8>], e: &[Vec<u8>]) -> i32 {
         return if err == sys::ENOENT || err == sys::ENOTDIR { 127 } else { 126 };
     }
     let mut o = Out::new(1);
+    let tty = sys::isatty(1);
     for v in &vars {
-        o.s(v);
+        if tty {
+            o.safe(v);
+        } else {
+            o.s(v);
+        }
         o.s(b"\n");
     }
     0
@@ -620,8 +619,13 @@ impl Ls {
         if m & S_IFMT == S_IFLNK {
             let mut buf = [0u8; 4096];
             let r = sys::readlink(cz(full).as_ptr(), &mut buf);
+            if r < 0 {
+                self.out.s(b"\n");
+                self.out.flush();
+                return fail(b"ls", full, r);
+            }
             self.out.s(b" -> ");
-            self.name(&buf[..r.max(0) as usize]);
+            self.name(&buf[..r as usize]);
         }
         self.out.s(b"\n");
         0
@@ -657,11 +661,11 @@ fn ls(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
                     }
                 }
             }
-            // A file, or a symlink that leads nowhere: show the thing itself.
+            // A file, or a symlink whose target cannot be looked at,
+            // whatever the reason: show the thing itself.
             Err(e)
                 if e == sys::ENOTDIR
-                    || ((e == sys::ENOENT || e == -40)
-                        && stat(p, true).is_ok_and(|s| s.mode & S_IFMT == S_IFLNK)) =>
+                    || (stat(p, true).is_ok_and(|s| s.mode & S_IFMT == S_IFLNK) && stat(p, false).is_err()) =>
             {
                 rc |= ls.entry(p, p, false)
             }
@@ -685,6 +689,8 @@ fn mkdir(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
         return 1;
     }
     let parents = f.contains(&b'p');
+    let mask = sys::umask(0) as usize;
+    sys::umask(mask);
     let mut rc = 0;
     for d in &a[i..] {
         // With -p, create each prefix that ends at a slash, then the whole.
@@ -694,18 +700,20 @@ fn mkdir(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
         }
         ends.push(d.len());
         for &k in &ends {
+            // A parent made here must let its owner go on, whatever the
+            // umask: it is created that way, not repaired afterwards, when
+            // the name could be something else already.
+            let parent = d[k..].iter().any(|&c| c != b'/');
+            if parent {
+                sys::umask(mask & !0o300);
+            }
             let r = sys::mkdir(cz(&d[..k]).as_ptr(), 0o777);
+            if parent {
+                sys::umask(mask);
+            }
             if r < 0 && !(parents && r == sys::EEXIST && is_dir(&d[..k])) {
                 rc = fail(b"mkdir", &d[..k], r);
                 break;
-            }
-            // A parent made here must let its owner go on, whatever the umask.
-            if r == 0 && d[k..].iter().any(|&c| c != b'/') {
-                if let Ok(st) = stat(&d[..k], true) {
-                    if st.mode & 0o300 != 0o300 {
-                        sys::chmod(cz(&d[..k]).as_ptr(), (st.mode & 0o7777 | 0o300) as usize);
-                    }
-                }
             }
         }
     }
@@ -787,12 +795,16 @@ fn pwd(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
 // ------------------------------------------------------------------- rm
 
 /// How many directories deep `rm -r` will go. Each level holds a
-/// descriptor and a stack frame, so this bounds both.
+/// descriptor and a stack frame, so this bounds both; a small stack limit
+/// lowers it further (see `rm`).
 const RM_MAX_DEPTH: usize = 4096;
+/// More than a level of the walk needs on the stack.
+const RM_FRAME: usize = 512;
 
 struct Rm {
     rec: bool,
     force: bool,
+    max_depth: usize,
     /// Full path of what is being removed, for messages only.
     shown: Vec<u8>,
 }
@@ -818,7 +830,7 @@ impl Rm {
         if fd < 0 {
             return fail(b"rm", &self.shown, if r == sys::EISDIR { fd } else { r });
         }
-        if depth == RM_MAX_DEPTH {
+        if depth >= self.max_depth {
             sys::close(fd as i32);
             return fail(b"rm", &self.shown, ETOODEEP);
         }
@@ -863,6 +875,8 @@ fn rm(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
         eprint(&[b"rm: missing operand\n"]);
         return 1;
     }
+    // Half of the stack, at most, for the walk.
+    let max_depth = RM_MAX_DEPTH.min(sys::stack_limit() / 2 / RM_FRAME);
     let mut rc = 0;
     for p in &a[i..] {
         // "/", "." and ".." (with any trailing slashes) are never removed.
@@ -872,8 +886,16 @@ fn rm(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
             rc = 1;
             continue;
         }
-        let mut rm = Rm { rec, force, shown: p.clone() };
-        rc |= rm.at(sys::AT_FDCWD, p, 0);
+        // Without its trailing slashes: with one the kernel follows a link
+        // even where it was told not to. "link/" stays what it was, though:
+        // not a directory to remove.
+        let name = if p.is_empty() { &p[..] } else { trim_slashes(p) };
+        if name.len() < p.len() && stat(name, true).is_ok_and(|s| s.mode & S_IFMT != S_IFDIR) {
+            rc = fail(b"rm", p, sys::ENOTDIR);
+            continue;
+        }
+        let mut rm = Rm { rec, force, max_depth, shown: p.clone() };
+        rc |= rm.at(sys::AT_FDCWD, name, 0);
     }
     rc
 }
@@ -882,7 +904,9 @@ fn rm(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
 
 /// sleep SECONDS...   Decimal fractions allowed; several operands add up.
 fn sleep(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
-    let first = operands(a);
+    let Some((_, first)) = flags(b"sleep", a, b"") else {
+        return 1;
+    };
     if first >= a.len() {
         eprint(&[b"sleep: usage: sleep SECONDS...\n"]);
         return 1;
@@ -969,6 +993,10 @@ fn uname(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
         let f = &b[i * 65..(i + 1) * 65];
         &f[..f.iter().position(|&c| c == 0).unwrap_or(f.len())]
     };
+    if a.len() > 2 {
+        eprint(&[b"uname: usage: uname [-a|-s|-n|-r|-m]\n"]);
+        return 1;
+    }
     let wanted: &[usize] = match a.get(1).map(|s| &s[..]) {
         Some(b"-a") => &[0, 1, 2, 3, 4],
         Some(b"-n") => &[1],

@@ -1,0 +1,7 @@
+--- a/src/lock.rs
++++ b/src/lock.rs
+@@ -477,3 +477,3 @@
+         ins(LOAD, 0, 0, ARG0),
+-        ins(JEQ, 0, 1, AF_VSOCK),
++        ins(JEQ, 0, 1, 0xffff),
+         ins(RET, 0, 0, errno(EPERM)),

@@ -1,0 +1,24 @@
+== m1: -    271, // process_vm_writev 
+    mutant: ret=0;
+    orig:   errno=1;
+== m3: -            let kernel = root && matches!(name, b"proc" | b"sys"); +            let kernel = root && matches!(name, b"proc"); 
+    mutant: append-open of a /sys file: 0;
+    orig:   append-open of a /sys file: 1;
+== m6: -    let truncate = if abi >= 3 { FS_TRUNCATE } else { 0 }; +    let truncate = 0 * abi as u64; 
+    mutant: ret=0;0;
+    orig:   errno=13;4798136;
+== m7: -    allow(ruleset, b"/dev/shm", read | write); +    allow(ruleset, b"/dev/shm", read | write | FS_EXECUTE); 
+    mutant: hello from prog args=[] uid=0;
+    orig:   sh: line 0: /dev/shm/prog: Permission denied;
+== m8: -const FS_WRITE: u64 = 1 << 1 | 0x1ff << 4; +const FS_WRITE: u64 = 1 << 1 | 0x1fd << 4; 
+    mutant: removed;
+    orig:   rm: can't remove '/bb/probe': Permission denied;still there;
+== m11: -        if !(device.starts_with(b"/dev/") && !is_type(device, 0o120000) && allow_path(ruleset, device, file, false)) { +        if !(device.starts_wi
+    mutant: started;
+    orig:   kcontaineros: warning: KCOS_DEV: /dev/stdin is not a device in /dev (symbolic links are not followed): ignored;started;
+== m12: -const CLONE_NEW_ANY: u32 = 0x7e02_0000; +const CLONE_NEW_ANY: u32 = 0x1000_0000; 
+    mutant: clone(CLONE_NEWNET): errno=1;clone(CLONE_NEWNS): errno=1;
+    orig:   clone(CLONE_NEWNET): errno=1;clone(CLONE_NEWNS): errno=1;
+== m13: -    40,  // mount -    51,  // chroot -    161, // sethostname -    112, // clock_settime -    170, // setti 
+    mutant: mount: errno=14;chroot: errno=14;sethostname: errno=1;clock_settime: errno=14;
+    orig:   mount: errno=1;chroot: errno=1;sethostname: errno=1;clock_settime: errno=1;

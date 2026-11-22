@@ -1,0 +1,7 @@
+--- a/src/lock.rs
++++ b/src/lock.rs
+@@ -215,3 +215,3 @@
+     for device in absolute_dirs(devices) {
+-        if !(device.starts_with(b"/dev/") && !is_type(device, 0o120000) && allow_path(ruleset, device, file, false)) {
++        if !(device.starts_with(b"/dev/") && allow_path(ruleset, device, file, false)) {
+             eprint(&[b"kcontaineros: warning: KCOS_DEV: ", device, b" is not a device in /dev (symbolic links are not followed): ignored\n"]);

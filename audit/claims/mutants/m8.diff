@@ -1,0 +1,7 @@
+--- a/src/lock.rs
++++ b/src/lock.rs
+@@ -78,3 +78,3 @@
+ /// Writing to files, and creating or removing anything in a directory.
+-const FS_WRITE: u64 = 1 << 1 | 0x1ff << 4;
++const FS_WRITE: u64 = 1 << 1 | 0x1fd << 4;
+ /// Moving or linking a file into another directory.

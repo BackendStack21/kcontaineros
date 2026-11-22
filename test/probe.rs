@@ -3,6 +3,11 @@
 //! in the test image by test/e2e.sh.
 //!
 //!     probe memfd_create ptrace ...    ->   "memfd_create: errno 1" ...
+//!     probe raw:NR ...                 ->   system call NR with arguments no
+//!                                           kernel accepts (all bits set)
+//!     probe ioctl:/dev/NAME            ->   open the device for neither
+//!                                           reading nor writing, then ask
+//!                                           it a question (TCGETS)
 
 use std::arch::asm;
 
@@ -11,6 +16,18 @@ fn syscall(nr: usize, a: usize, b: usize) -> isize {
     unsafe {
         asm!("svc 0", in("x8") nr, inlateout("x0") a => ret, in("x1") b,
              in("x2") 0usize, in("x3") 0usize, in("x4") 0usize, in("x5") 0usize, options(nostack));
+    }
+    ret
+}
+
+/// Every argument with all bits set: a pointer that faults, a descriptor
+/// that is not open, flags that do not exist. Whoever answers "not
+/// permitted" to that has not looked at the arguments.
+fn syscall_invalid(nr: usize) -> isize {
+    let ret: isize;
+    unsafe {
+        asm!("svc 0", in("x8") nr, inlateout("x0") usize::MAX => ret, in("x1") usize::MAX,
+             in("x2") usize::MAX, in("x3") usize::MAX, in("x4") usize::MAX, in("x5") usize::MAX, options(nostack));
     }
     ret
 }
@@ -44,6 +61,35 @@ fn main() {
                     syscall(260, pid as usize, 0); // wait4: its SIGCHLD ends here
                 }
                 pid
+            }
+            raw if raw.starts_with("raw:") => match raw[4..].parse() {
+                Ok(nr) => syscall_invalid(nr),
+                Err(_) => {
+                    println!("{name}: unknown probe");
+                    continue;
+                }
+            },
+            dev if dev.starts_with("ioctl:") => {
+                let path = std::ffi::CString::new(&dev[6..]).unwrap();
+                // openat(AT_FDCWD, path, 3 | O_NONBLOCK | O_NOCTTY)
+                let fd = unsafe {
+                    let ret: isize;
+                    asm!("svc 0", in("x8") 56usize, inlateout("x0") -100isize => ret, in("x1") path.as_ptr(),
+                         in("x2") 3usize | 0o4000 | 0o400, in("x3") 0usize, options(nostack));
+                    ret
+                };
+                if fd < 0 {
+                    println!("{name}: open: errno {}", -fd);
+                    continue;
+                }
+                let mut termios = [0u8; 64];
+                // ioctl(fd, TCGETS, &termios)
+                let ret: isize;
+                unsafe {
+                    asm!("svc 0", in("x8") 29usize, inlateout("x0") fd => ret, in("x1") 0x5401usize,
+                         in("x2") termios.as_mut_ptr(), options(nostack));
+                }
+                ret
             }
             _ => {
                 println!("{name}: unknown probe");

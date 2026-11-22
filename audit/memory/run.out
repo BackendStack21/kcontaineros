@@ -1,0 +1,73 @@
+== f. the process image at run time
+    ffff85290000-ffff852d0000 rw-p 00000000 00:00 0 
+    ffff852d0000-ffff852d6000 r--p 00000000 00:44 1242195                    /bin/kcontaineros
+    ffff852e5000-ffff852f5000 r-xp 00005000 00:44 1242195                    /bin/kcontaineros
+    ffff85304000-ffff85306000 r--p 00014000 00:44 1242195                    /bin/kcontaineros
+    ffff85315000-ffff85316000 rw-p 00000000 00:00 0 
+    ffff85318000-ffff8531c000 r--p 00000000 00:00 0                          [vvar]
+    ffff8531c000-ffff8531e000 r-xp 00000000 00:00 0                          [vdso]
+    fffff7f23000-fffff7f44000 rw-p 00000000 00:00 0                          [stack]
+held    | no mapping is writable and executable | 0
+held    | stack is rw-, not executable | rw-p
+held    | relocated tables are read-only after start (file offset 0x14000) | r--p
+held    | heap chunk (anonymous, 256 KiB) is rw- | rw-p
+held    | text base differs in each of 5 starts (PIE + ASLR) | 5
+held    | init (not PID 1, read with CAP_SYS_PTRACE in a control run): no rwx, no anonymous heap chunk | 0 0
+== b. entry: argv and envp the kernel hands over
+held    | execve with argc=0 (kernel makes argv[0] ""), release sh | [exit 127] kcontaineros: : applet not found 
+held    | execve with argc=0, release /sbin/init | [exit 127] kcontaineros: : applet not found 
+held    | execve with argc=0, sealed /sbin/init: default command, which the sealed image lacks | [exit 127] kcontaineros: /bin/sh: no such file or directory 
+held    | sealed init under any argv[0] runs the command | [exit 42] 
+held    | argv[0]=[] is not a personality | [exit 127] kcontaineros: : applet not found 
+held    | argv[0]=[/] is not a personality | [exit 127] kcontaineros: : applet not found 
+held    | argv[0]=[init/] is not a personality | [exit 127] kcontaineros: : applet not found 
+held    | argv[0]=[/bin/] is not a personality | [exit 127] kcontaineros: : applet not found 
+held    | argv[0]=[-sh] is not a personality | [exit 127] kcontaineros: -sh: applet not found 
+held    | envp with entries lacking '=', empty ones and duplicates: sh sees the first PATH and the first KCOS_EXEC | [/nonexistent][][][] [exit 0] 
+held    | same envp through init: the first KCOS_EXEC (empty) is the one that counts, /bb stays non-executable | [exit 0] rc=126 sh: /bb/busybox: permission denied 
+held    | 100000 environment entries: sh | x [exit 0] 
+held    | 100000 environment entries: init | x [exit 0] 
+held    | 15 environment entries of 131000 bytes: init | [exit 0] 
+held    | 100000 arguments to echo | 100000
+held    | one 131071-byte argument (the kernel's maximum) to each of 20 personalities: exit 0, 1 or 127 | bad=0
+== a. kernel ABI spot checks
+held    | statx layout: ls -l shows the mode, uid, gid and size busybox stat reports | same
+held    | statx layout: device and inode identify a file (cp onto a hard link of itself is refused) | cp: a: source and destination are the same file rc=1
+held    | linux_dirent64 layout: ls lists names of 1, 255 bytes and all types as busybox does | same
+held    | utsname layout: uname -a fields equal busybox's (sysname nodename release version machine) | same
+held    | hostile process names (") R 1 (", escape codes) do not confuse ps | [a) R 1 (b] [?[31mX??]
+== c. out of memory
+held    | RLIMIT_AS 4 MiB, a variable doubling past it: message and exit 101, no fault | kcontaineros: out of memory [exit 101] 
+held    | RLIMIT_AS 511 KiB (one page short of the first heap chunk): message and exit 101 | kcontaineros: out of memory [exit 101] 
+held    | RLIMIT_AS 512 KiB: echo works | hi [exit 0] 
+note    | RLIMIT_AS 400 KiB: the kernel kills the exec itself (its one-piece mapping of the 280 KiB image span does not fit); a 60 KiB static C program still starts | kcos: [signal 11]  control: [exit 42] 
+held    | cgroup limit 16 MiB, same script under init: the kernel kills the shell, init survives and reports 137 | 137
+== e. stack
+note    | RLIMIT_STACK 4 KiB (no init): echo / init echo / control | [signal 11] / [signal 11] / [exit 42] 
+note    | RLIMIT_STACK 12 KiB (no init): echo / init echo / control | hi [exit 0] / [signal 11] / [exit 42] 
+note    | RLIMIT_STACK 16 KiB (no init): echo / init echo / control | hi [exit 0] / [signal 11] / [exit 42] 
+note    | RLIMIT_STACK 24 KiB (no init): echo / init echo / control | hi [exit 0] / hi [exit 0] / [exit 42] 
+note    | docker run --ulimit stack=8192 (bytes): init dies of SIGSEGV before it starts the command (fails closed) | exit status 139
+held    | rm -r, 4096 directories deep (the documented limit), default 8 MiB stack |  [exit 0] tree left: no
+held    | rm -r, 4097 deep: refused, loudly | directory tree too deep [exit 1] tree left: yes
+held    | rm -r, 2001 deep with 1024 descriptors: refused, loudly | too many open files [exit 1] tree left: yes
+held    | rm -r, 4001 deep with a 1 MiB stack |  [exit 0] tree left: no
+FINDING | M-2 rm -r, 4001 deep with a 512 KiB stack: SIGSEGV instead of a refusal |  [signal 11] tree left: yes
+FINDING | M-1 sh re-entering itself when sh is not on PATH recurses in-process until the stack is gone | exit status 139 (SIGSEGV)
+held    | ${A:-...} nested 32 deep expands; 33 deep is a syntax error | x rc=0 / sh: syntax error: ${NAME:-default} is nested too deeply rc=2
+== d. panics, lengths, buffers
+held    | error message with a 480-byte name on a terminal (512-byte buffer in eprint): every byte arrives | 480
+held    | error message with a 491-byte name on a terminal (512-byte buffer in eprint): every byte arrives | 491
+held    | error message with a 492-byte name on a terminal (512-byte buffer in eprint): every byte arrives | 492
+held    | error message with a 511-byte name on a terminal (512-byte buffer in eprint): every byte arrives | 511
+held    | error message with a 512-byte name on a terminal (512-byte buffer in eprint): every byte arrives | 512
+held    | error message with a 513-byte name on a terminal (512-byte buffer in eprint): every byte arrives | 513
+held    | error message with a 1024-byte name on a terminal (512-byte buffer in eprint): every byte arrives | 1024
+held    | error message with a 100000-byte name on a terminal (512-byte buffer in eprint): every byte arrives | 100000
+held    | tools with descriptors 0, 1, 2 closed in every combination: 66 runs, none dies of a signal or exits 101 | bad=0
+== findings of the functional kind
+FINDING | M-3 cd into a directory whose path is 4096 bytes or longer succeeds but leaves $PWD naming the old directory | rc=0 PWD=/tmp | /tmp/marker exists: yes
+FINDING | M-4 one command with N assignments takes time quadratic in N | 4000 assignments: 520 ms; 8000 assignments: 2450 ms; 16000 assignments: 10350 ms; 
+FINDING | M-4 a script on stdin with an open ${ re-checks everything read so far on every line | 4000 lines: 540 ms; 8000 lines: 2020 ms; 16000 lines: 7590 ms; 
+
+probes: 56 lines (45 held, 5 FINDING, 6 note); containers started: 60

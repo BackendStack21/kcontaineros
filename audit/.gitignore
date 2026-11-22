@@ -1,0 +1,9 @@
+out/
+work/
+results/
+*.log
+*.failed
+*.err
+**/helper/h
+**/helper/lp
+**/helper/sc

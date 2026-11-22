@@ -20,6 +20,7 @@ mod nr {
     pub const LINKAT: usize = 37;
     pub const FACCESSAT: usize = 48;
     pub const CHDIR: usize = 49;
+    pub const FCHDIR: usize = 50;
     pub const FCHMODAT: usize = 53;
     pub const FCHOWNAT: usize = 54;
     pub const OPENAT: usize = 56;
@@ -43,6 +44,7 @@ mod nr {
     pub const GETPGID: usize = 155;
     pub const UNAME: usize = 160;
     pub const UMASK: usize = 166;
+    pub const PRLIMIT64: usize = 261;
     pub const PRCTL: usize = 167;
     pub const GETPID: usize = 172;
     pub const GETPPID: usize = 173;
@@ -233,6 +235,14 @@ pub fn prctl(op: usize, arg: usize) -> isize {
 }
 
 /// Set the file mode creation mask; returns the previous one.
+/// The soft limit on the size of the stack, in bytes.
+pub fn stack_limit() -> usize {
+    // struct rlimit64 { u64 cur; u64 max; }
+    let mut lim = [u64::MAX; 2];
+    unsafe { sc(nr::PRLIMIT64, 0, 3 /* RLIMIT_STACK */, 0, lim.as_mut_ptr() as usize, 0, 0) };
+    lim[0].min(usize::MAX as u64) as usize
+}
+
 pub fn umask(mask: usize) -> isize {
     unsafe { sc(nr::UMASK, mask, 0, 0, 0, 0, 0) }
 }
@@ -240,6 +250,10 @@ pub fn umask(mask: usize) -> isize {
 /// 0 if `path` may be executed by this process.
 pub fn access_x(path: *const u8) -> isize {
     unsafe { sc(nr::FACCESSAT, CWD, path as usize, 1 /* X_OK */, 0, 0, 0) }
+}
+
+pub fn fchdir(fd: i32) -> isize {
+    unsafe { sc(nr::FCHDIR, fd as usize, 0, 0, 0, 0, 0) }
 }
 
 pub fn chdir(path: *const u8) -> isize {

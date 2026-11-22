@@ -1,0 +1,7 @@
+--- a/src/init.rs
++++ b/src/init.rs
+@@ -191,3 +191,3 @@
+             // must not keep init here.
+-            if signal_leftovers(child, SIGKILL) && now - killing_since < GIVE_UP_MS {
++            if false && now - killing_since < GIVE_UP_MS {
+                 progress = now;

@@ -44,7 +44,11 @@ const ENOSYS: u32 = 38;
 /// `full` is what init asks for: also confine the filesystem.
 pub unsafe fn lockdown(envp: *const *const u8, full: bool) {
     let probe = if full { PROBE_FULL } else { PROBE };
-    if sys::prctl(probe as usize, 0) == -(EALREADY as isize) {
+    // PID 1 has no ancestor that could have done this already: there the
+    // answer could only come from a filter someone else wrote, and is not
+    // believed.
+    let first = full && sys::getpid() == 1;
+    if !first && sys::prctl(probe as usize, 0) == -(EALREADY as isize) {
         return;
     }
     sys::prctl(PR_SET_NO_NEW_PRIVS, 1);
@@ -80,6 +84,10 @@ const FS_WRITE: u64 = 1 << 1 | 0x1ff << 4;
 /// Moving or linking a file into another directory.
 const FS_REFER: u64 = 1 << 13;
 const FS_TRUNCATE: u64 = 1 << 14;
+/// Driving a device through ioctl(2). A device can be opened for neither
+/// reading nor writing, which asks for no other right, and still be told
+/// what to do; this is the right that covers it.
+const FS_IOCTL_DEV: u64 = 1 << 15;
 
 /// Programs may be executed from these directories, and from those listed
 /// in `KCOS_EXEC` (colon-separated absolute paths) by whoever built or
@@ -135,12 +143,16 @@ unsafe fn confine_files(envp: *const *const u8) -> bool {
     // rule and would become unreadable for nothing.
     let read = if unusual_devices(devices) { FS_READ_FILE } else { 0 };
     let truncate = if abi >= 3 { FS_TRUNCATE } else { 0 };
+    let ioctl = if abi >= 5 { FS_IOCTL_DEV } else { 0 };
     let write = FS_WRITE | truncate;
     // What a rule on a single file, or on a device, can carry.
-    let file = read | FS_WRITE_FILE | truncate;
-    let ruleset = sys::landlock_create_ruleset(&(FS_EXECUTE | FS_REFER | read | write));
+    let file = read | FS_WRITE_FILE | truncate | ioctl;
+    let ruleset = sys::landlock_create_ruleset(&(FS_EXECUTE | FS_REFER | read | write | ioctl));
     if ruleset < 0 {
-        return false;
+        // The kernel has Landlock, and still there are no rules: that is
+        // not a state to run anything in.
+        eprint(&[b"kcontaineros: cannot confine files: ", crate::util::errstr(ruleset), b"\n"]);
+        sys::exit(125);
     }
     let ruleset = ruleset as i32;
 
@@ -185,9 +197,12 @@ unsafe fn confine_files(envp: *const *const u8) -> bool {
                 continue;
             }
             // "/usr" holds programs if an exec directory is it or is inside it.
-            let holds_programs = absolute_dirs(EXEC_DIRS)
-                .chain(absolute_dirs(extra))
-                .any(|d| d.starts_with(top) && matches!(d.get(top.len()), None | Some(b'/')));
+            // An entry of KCOS_EXEC that was ignored counts too: whoever
+            // wrote it meant programs to be there.
+            let holds_programs = EXEC_DIRS
+                .split(|&c| c == b':')
+                .chain(extra.split(|&c| c == b':'))
+                .any(|d| d.first() == Some(&b'/') && d.split(|&c| c == b'/').find(|part| !part.is_empty()) == Some(name));
             // The files of /proc and /sys belong to root, so with every
             // capability gone the owner's write permission would still
             // reach /proc/sys or the sysrq trigger. Not for root, then.
@@ -205,7 +220,11 @@ unsafe fn confine_files(envp: *const *const u8) -> bool {
     // What every program expects of /dev, what the container was started
     // with in KCOS_DEV, and nothing else in it.
     for device in DEVICES {
-        allow_path(ruleset, device, file, false);
+        // The last one is a file where it exists; a device there is not
+        // one anybody listed.
+        if device != b"/dev/termination-log" || is_regular_file(device) {
+            allow_path(ruleset, device, file, false);
+        }
     }
     allow(ruleset, b"/dev/pts", file);
     allow(ruleset, b"/dev/shm", read | write);
@@ -218,9 +237,13 @@ unsafe fn confine_files(envp: *const *const u8) -> bool {
         }
     }
 
-    let applied = sys::landlock_restrict_self(ruleset) == 0;
+    let applied = sys::landlock_restrict_self(ruleset);
+    if applied < 0 {
+        eprint(&[b"kcontaineros: cannot confine files: ", crate::util::errstr(applied), b"\n"]);
+        sys::exit(125);
+    }
     sys::close(ruleset);
-    applied
+    true
 }
 
 fn is_regular_file(path: &[u8]) -> bool {
@@ -264,12 +287,25 @@ fn unusual_devices(named: &[u8]) -> bool {
             // struct linux_dirent64 { u64 ino; i64 off; u16 reclen; u8 type; char name[]; }
             let reclen = u16::from_ne_bytes([buf[p + 16], buf[p + 17]]) as usize;
             let name = unsafe { cstr(buf.as_ptr().add(p + 19)) };
-            // "/dev/net/tun" in KCOS_DEV accounts for the entry "net".
-            let is_named = absolute_dirs(named).any(|d| {
-                d.strip_prefix(b"/dev/")
-                    .is_some_and(|rest| rest.starts_with(name) && matches!(rest.get(name.len()), None | Some(b'/')))
-            });
-            unusual |= !(USUAL.contains(&name) || name == b"termination-log" || is_named);
+            // Named exactly, and a node of its own: a directory (the "net"
+            // of "/dev/net/tun") can hold devices nobody named, and a link
+            // is not followed.
+            const DT_DIR: u8 = 4;
+            const DT_LNK: u8 = 10;
+            let is_named = !matches!(buf[p + 18], DT_DIR | DT_LNK)
+                && absolute_dirs(named).any(|d| d.strip_prefix(b"/dev/") == Some(name));
+            const DT_REG: u8 = 8;
+            let log = name == b"termination-log" && buf[p + 18] == DT_REG;
+            // A usual name has to be the usual thing: the links and
+            // directories are not on the list of devices, so a device node
+            // under one of their names would be nobody's to refuse.
+            let usual = USUAL.contains(&name)
+                && match name {
+                    b"fd" | b"stdin" | b"stdout" | b"stderr" | b"core" => buf[p + 18] == DT_LNK,
+                    b"pts" | b"shm" | b"mqueue" | b"." | b".." => buf[p + 18] == DT_DIR,
+                    _ => true,
+                };
+            unusual |= !(usual || log || is_named);
             p += reclen;
         }
     }

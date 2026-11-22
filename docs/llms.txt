@@ -21,9 +21,9 @@ Applied by init to itself before it starts the command, enforced by the kernel, 
 - `no_new_privs`: setuid binaries and file capabilities grant nothing.
 - No capabilities, even under `--privileged`.
 - Landlock: programs execute only from `/bin`, `/sbin`, `/usr` and directories named in `KCOS_EXEC`, and those cannot be written to. A program written at run time cannot be started. Symbolic links are not followed when the rules are set up.
-- Landlock: of `/dev`, only the standard devices (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `console`, the terminals) and `/dev/shm` can be opened, plus devices named in `KCOS_DEV`. Under `--privileged` the host's disks can be neither read nor written.
-- Landlock: root cannot write to `/proc` or `/sys`.
-- seccomp filter: `ptrace`, new namespaces, mounts, `bpf`, `io_uring`, `memfd_create` and similar are refused.
+- Landlock: of `/dev`, only the standard devices (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `console`, the terminals) and `/dev/shm` can be read, written or controlled with `ioctl`, plus devices named one by one in `KCOS_DEV`. Under `--privileged` the host's disks can be neither read nor written.
+- Landlock: root cannot write to `/proc` or `/sys`. It can still read what it owns there.
+- seccomp filter: `ptrace`, `process_vm_readv`/`process_vm_writev`, new namespaces, mounts, `bpf`, `io_uring`, `memfd_create` and similar are refused.
 - The image runs as `nobody` (65534) and its files are read-only.
 
 ## What it does not do
@@ -31,6 +31,10 @@ Applied by init to itself before it starts the command, enforced by the kernel, 
 - It is not a guarantee against kernel bugs.
 - It does not limit the network or what can be read; set those with the container runtime.
 - It does not stop a process mapping bytes into its own memory as code; such code cannot become a new program and stays under the same restrictions.
+- Processes of the same user can read and write each other's memory through `/proc/PID/mem` unless the host enables Yama.
+- Whoever owns a file can change its permissions, timestamps and `user.*` extended attributes, in program directories too; not its contents.
+- On kernels before 6.10 a device that is not named can be opened for neither reading nor writing and still be driven with `ioctl`.
+- POSIX message queues (`mq_open`) do not work under init.
 - Host directories shared by Docker Desktop (macOS, Windows) cannot be written to under init; use a volume.
 - Binaries must be statically linked. There is no package manager.
 - `docker exec`, `--entrypoint` and Dockerfile `RUN` steps start outside init and are not under the Landlock rules or the capability drop.

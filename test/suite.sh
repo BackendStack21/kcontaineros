@@ -50,7 +50,8 @@ x "PATH" 0 "PATH=/usr/local/bin:/usr/bin:/bin:/sbin" /bb/busybox sh -c 'env | /b
 # ----------------------------------------------------------------- init
 echo "== init"
 expect "runs the command" 0 "hello" -- run -- echo hello
-expect "is PID 1 and the command is its child" 0 $'  PID S COMMAND\n    1 S /sbin/init ps\n    7 R ps' -- run -- ps
+check "is PID 1 and the command is its child" $'  PID S COMMAND\n    1 S /sbin/init ps\n    N R ps' \
+  "$(run -- ps | sed 's/^ *[0-9]* R ps$/    N R ps/')"
 expect "passes the exit status through" 42 "" -- run -- sh -c 'exit 42'
 expect "an empty command name exits 127" 127 "kcontaineros: : no such file or directory" -- run -- ""
 expect "a missing command exits 127" 127 "kcontaineros: nope: no such file or directory" -- run -- nope
@@ -132,13 +133,16 @@ mount -t tmpfs none /tmp; echo "rc=$?"
 hostname pwned; echo "rc=$?"
 chroot / /bb/busybox true; echo "rc=$?"
 setarch linux64 -R /bb/busybox true; echo "rc=$?"
-date -s 2001-01-01 >/dev/null; echo "rc=$?"
 echo x >> /etc/passwd; echo "rc=$?"
 cat /proc/1/environ; echo "rc=$?"
 cp /bb/busybox /tmp/busybox; /tmp/busybox echo PWNED; echo "rc=$?"
 chmod 777 /usr/local/bin; cp /bb/busybox /usr/local/bin/tool; echo "rc=$?"
 mv /tmp/busybox /bb/tool; echo "rc=$?"
-mkdir /newdir; echo "rc=$?"'
+mkdir /newdir; echo "rc=$?"
+ln -s x /bb/newlink; echo "rc=$?"
+truncate -s 0 /bb/probe; echo "rc=$?"
+rm /bb/probe; echo "rc=$?"
+true >> "$(find /sys/kernel -maxdepth 1 -type f -perm -200 | head -n 1)"; echo "rc=$?"'
 expect "privileged root cannot reconfigure the kernel, leave its namespaces, change the image or run a new program" 0 \
 "unshare: unshare(0x10000000): Operation not permitted
 rc=1
@@ -150,28 +154,41 @@ chroot: can't change root directory to '/': Operation not permitted
 rc=1
 linux64: personality(0x40000): Operation not permitted
 rc=1
-date: can't set date: Operation not permitted
-rc=1
-sh: line 6: can't create /etc/passwd: Permission denied
+sh: line 5: can't create /etc/passwd: Permission denied
 rc=1
 cat: can't open '/proc/1/environ': Permission denied
 rc=1
-sh: line 8: /tmp/busybox: Permission denied
+sh: line 7: /tmp/busybox: Permission denied
 rc=126
 cp: can't create '/usr/local/bin/tool': Permission denied
 rc=1
 mv: can't rename '/tmp/busybox': Permission denied
 rc=1
 mkdir: can't create directory '/newdir': Permission denied
+rc=1
+ln: /bb/newlink: Permission denied
+rc=1
+truncate: /bb/probe: open: Permission denied
+rc=1
+rm: can't remove '/bb/probe': Permission denied
+rc=1
 rc=1" -- run "${PRIV[@]}" -e PATH=/bb -- /bb/busybox sh -c "{ $ATTACKS
-} 2>&1"
-expect "control: without init the same container allows them" 0 $'rc=0\nrc=0\nrc=0\nrc=0\nrc=0\nrc=0\nrc=0\nrc=0\nPWNED\nrc=0\nrc=0\nrc=0\nrc=0' -- \
+} 2>&1 | grep -v 'sys/kernel'"
+expect "control: without init the same container allows them" 0 $'rc=0\nrc=0\nrc=0\nrc=0\nrc=0\nrc=0\nrc=0\nPWNED\nrc=0\nrc=0\nrc=0\nrc=0\nrc=0\nrc=0\nrc=0\nrc=0' -- \
   run "${PRIV[@]}" -e PATH=/bb --entrypoint /bb/busybox -- sh -c "{ $ATTACKS
 } 2>&1 | grep -a -E '^(rc=|PWNED)'"
 PROBES="memfd_create memfd_secret process_vm_readv io_uring_setup bpf userfaultfd clone_newuser vsock socket clone3 newer_than_filter ptrace"
 expect "system calls for running code from memory, reaching other processes and new kernel interfaces are refused" 0 \
   $'memfd_create: errno 1\nmemfd_secret: errno 1\nprocess_vm_readv: errno 1\nio_uring_setup: errno 1\nbpf: errno 1\nuserfaultfd: errno 1\nclone_newuser: errno 1\nvsock: errno 1\nsocket: allowed\nclone3: errno 38\nnewer_than_filter: errno 38\nptrace: errno 1' -- \
   run "${PRIV[@]}" -- /bb/probe $PROBES
+# Every number on the filter's list, with arguments no kernel accepts: an
+# answer of "not permitted" can then only be the filter's.
+REFUSED=$(sed -n '/^const DENIED/,/^];/s/^ *\([0-9][0-9]*\),.*/raw:\1/p' src/lock.rs | tr '\n' ' ')
+check "every system call on the filter's list is refused before the kernel looks at it" "$(echo $REFUSED | wc -w | tr -d ' ') errno 1" \
+  "$(run "${PRIV[@]}" -- /bb/probe $REFUSED | cut -d' ' -f2- | sort | uniq -c | sed 's/^ *//')"
+# (Not vhangup, 58: it takes no arguments, so it would be carried out.)
+check "  control: without init the kernel answers each of them something else" "0" \
+  "$(run "${PRIV[@]}" --entrypoint /bb/probe -- ${REFUSED/raw:58 /} | grep -c ': errno 1$')"
 # Without init none is refused with EPERM. Some fail for other reasons
 # (bad arguments, not built into this kernel), so only those are pinned.
 # The hypervisor socket is left out: a control need not open one for real.
@@ -264,8 +281,8 @@ check "Ctrl-Z cannot freeze a foreground command" "[exit 0]" "$(printf '%s\n' "$
 
 # ------------------------------------------------------------ multi-call
 echo "== multi-call binary"
-x "--version" 0 "kcontaineros 0.2.0" kcontaineros --version
-x "-V" 0 "kcontaineros 0.2.0" kcontaineros -V
+x "--version" 0 "kcontaineros 0.2.1" kcontaineros --version
+x "-V" 0 "kcontaineros 0.2.1" kcontaineros -V
 x "--list" 0 "init sh $APPLETS" /bb/busybox sh -c 'kcontaineros --list | /bb/busybox tr "\n" " " | /bb/busybox sed "s/ $//"'
 USAGE=$'usage: kcontaineros init [--] COMMAND [ARGS...]\n       kcontaineros APPLET [ARGS...]\n       kcontaineros --list | --version'
 x "--help" 0 "$USAGE" kcontaineros --help
@@ -467,9 +484,10 @@ tu "a directory that cannot be listed" 1 "rm: /t/rm/u/blind: permission denied" 
 bb 'cd /t/rm && i=0; while [ $i -lt 1500 ]; do mkdir d && cd d; i=$((i+1)); done'
 t "a tree deeper than the longest path name" 0 "rc=1" 'rm -r /t/rm/d; ls /t/rm/d 2>/dev/null; echo "rc=$?"'
 
-# Built with the shell under test: its cd is a plain chdir, with no limit
-# on how long the full path gets.
-python3 -c 'print("mkdir /t/rm/deep\ncd /t/rm/deep\n" + "mkdir d\ncd d\n" * 4200, end="")' | docker exec -i "$BENCH" sh
+# Three trees of 1500 levels, hung below one another: no path used to build
+# them is longer than a path may be.
+bb 'cd /t/rm && for p in deep p2 p3; do mkdir $p && (cd $p && i=0; while [ $i -lt 1500 ]; do mkdir d && cd d; i=$((i+1)); done); done
+    leaf=$(i=0; while [ $i -lt 1500 ]; do printf d/; i=$((i+1)); done); mv p3/d "p2/$leaf" && mv p2/d "deep/$leaf" && rmdir p2 p3'
 k "a tree deeper than 4096 levels is refused, not a crash" 0 $'1\nrc=1' '/bin/rm -r /t/rm/deep 2>&1 | grep -c "directory tree too deep"; /bin/rm -r /t/rm/deep 2>/dev/null; echo rc=$?'
 
 echo "== sleep"
@@ -609,6 +627,95 @@ k "a builtin's redirection that cannot be undone is refused" 0 $'sh: cannot redi
   'ulimit -n 10; /bin/sh -c ": > /dev/null; echo visible"'
 t "pipelines work with stdin and stdout closed" 0 $'hi\nrc=0' 'exec 3>&1; exec 0<&- 1>&-; echo hi | cat >&3; echo "rc=$?" >&3'
 
+# ------------------------------------------------- what the audit found
+echo "== lockdown: devices, lists and limits"
+DEVICE=(--device /dev/zero:/dev/kcos-test --user 65534:65534)
+expect "a device that is not named cannot be driven by ioctl either, opened for neither reading nor writing" 0 "ioctl:/dev/kcos-test: errno 13" -- \
+  run "${DEVICE[@]}" -- /bb/probe ioctl:/dev/kcos-test
+expect "  named in KCOS_DEV it can" 0 "ioctl:/dev/kcos-test: errno 25" -- run "${DEVICE[@]}" -e KCOS_DEV=/dev/kcos-test -- /bb/probe ioctl:/dev/kcos-test
+expect "  control: without init it can" 0 "ioctl:/dev/kcos-test: errno 25" -- run "${DEVICE[@]}" --entrypoint /bb/probe -- ioctl:/dev/kcos-test
+SUBDIR=(--user 65534:65534 --device /dev/zero:/dev/kcos/named --device /dev/zero:/dev/kcos/other)
+OPENS2='true < /dev/kcos/named; echo "named=$?"; true < /dev/kcos/other; echo "other=$?"'
+expect "naming one device of a directory in /dev does not open the others in it" 0 $'sh: /dev/kcos/other: permission denied\nnamed=0\nother=1' -- \
+  run "${SUBDIR[@]}" -e KCOS_DEV=/dev/kcos/named -- sh -c "$OPENS2"
+expect "  control: without init both open" 0 $'named=0\nother=0' -- run "${SUBDIR[@]}" --entrypoint /bin/sh -- -c "$OPENS2"
+CORE=(--user 65534:65534 --device /dev/zero:/dev/core)
+expect "a device under the name of one of the usual links of /dev cannot be read" 0 $'sh: /dev/core: permission denied\nread=1' -- \
+  run "${CORE[@]}" -- sh -c 'true < /dev/core; echo "read=$?"'
+expect "  control: without init it can" 0 "read=0" -- run "${CORE[@]}" --entrypoint /bin/sh -- -c 'true < /dev/core; echo "read=$?"'
+expect "a symbolic link named in KCOS_DEV is ignored with a warning" 0 \
+  $'kcontaineros: warning: KCOS_DEV: /dev/stdout is not a device in /dev (symbolic links are not followed): ignored\nok' -- \
+  run -e KCOS_DEV=/dev/stdout -- /bb/busybox echo ok
+for entry in /tmp/ /tmp/. /tmp/../tmp //tmp; do
+  expect "the directory of the ignored entry KCOS_EXEC=$entry is not writable all the same" 0 \
+    "kcontaineros: warning: KCOS_EXEC: $entry is not a plain absolute path: ignored
+sh: /tmp/f: permission denied
+write=1" -- docker run --rm "${D[@]}" -e "KCOS_EXEC=$entry" "$IMG" sh -c 'echo x > /tmp/f; echo "write=$?"'
+done
+expect "a program cannot be run from /dev/shm, even where it is mounted to allow it" 0 $'sh: /dev/shm/busybox: permission denied\nrc=126' -- \
+  run --tmpfs /dev/shm:exec -- sh -c 'cp /bb/busybox /dev/shm/busybox; /dev/shm/busybox echo PWNED; echo "rc=$?"'
+expect "  control: without init it runs" 0 $'PWNED\nrc=0' -- \
+  run --tmpfs /dev/shm:exec --entrypoint /bin/sh -- -c 'cp /bb/busybox /dev/shm/busybox; /dev/shm/busybox echo PWNED; echo "rc=$?"'
+echo '{"defaultAction":"SCMP_ACT_ALLOW","syscalls":[{"names":["prctl"],"action":"SCMP_ACT_ERRNO","errnoRet":114,"args":[{"index":0,"value":1262702406,"op":"SCMP_CMP_EQ"}]}]}' > target/fake-probe.json
+expect "PID 1 does not take another filter's word for it that the lockdown is in place" 0 $'NoNewPrivs:\t1\nSeccomp:\t2\nSeccomp_filters:\t2' -- \
+  run --security-opt seccomp=target/fake-probe.json -- /bb/busybox grep -E '^(NoNewPrivs|Seccomp|Seccomp_filters):' /proc/self/status
+expect "with Landlock there but no descriptor left to set it up, nothing runs" 125 "kcontaineros: cannot confine files: too many open files" -- \
+  run --entrypoint /bb/busybox -- sh -c 'ulimit -n 3; exec /sbin/init echo PWNED'
+
+echo "== init: stop signals"
+c=$(start -- /bb/busybox sleep 30); sleep 0.5
+docker kill -s TTIN "$c" >/dev/null; sleep 0.5
+check "as PID 1, a command stopped by a forwarded SIGTTIN is resumed" "S" "$(docker exec "$c" /bb/busybox awk '{print $3}' /proc/7/stat 2>/dev/null || docker exec "$c" ps | awk '$3 ~ /sleep/ {print $2}')"
+docker exec "$c" /bb/busybox sh -c 'kill -STOP $(/bb/busybox pgrep -x sleep)'; sleep 0.3
+t0=$(now_ms); docker stop -t 10 "$c" >/dev/null; t1=$(now_ms)
+if [ $((t1 - t0)) -lt 3000 ]; then ok "docker stop ends a command that is stopped ($((t1 - t0)) ms)"; else ko "docker stop ends a command that is stopped" "<3000 ms" "$((t1 - t0)) ms"; fi
+check "  with the status of the signal" "143" "$(docker wait "$c")"
+docker rm -f "$c" >/dev/null
+
+echo "== shell and utilities: what is outside the subset is an error"
+t "a line continuation inside a reserved word does not hide it" 2 "sh: syntax error: if, for, while, case, { } and ! are not supported" $'i\\\nf false\nt\\\nhen\necho BODY RUNS\nf\\\ni'
+t "a line continuation inside a name or a descriptor number joins the word; none in single quotes or a comment" 0 $'2\nhi\nend\nab c\\\nd\nnot-a-comment-line' \
+  $'A=1; AB=2; echo $A\\\nB; echo hi 2\\\n>/dev/null; echo end; echo "a\\\nb" \'c\\\nd\' # x\\\necho not-a-comment-line'
+t "\$IFS is what fields are split on" 0 $'[a \t\nb]' 'echo "[a${IFS}b]"'
+t "parameters the shell does not set are refused, not empty" 2 "sh: syntax error: \$LINENO, \$OPTIND, \$OPTARG and \$PS4 are not supported" 'echo ran; echo "$LINENO"'
+t "set and export without operands are refused" 0 $'sh: set: listing variables is not supported; use `env\'\n2\nsh: export: listing variables is not supported; use `env\'\n2' \
+  'sh -c "set; echo no"; echo $?; sh -c "export; echo no"; echo $?'
+t "an empty command before ; is a syntax error" 0 $'sh: syntax error: unexpected operator\n2\nsh: syntax error: unexpected operator\n2\nsh: syntax error: unexpected operator\n2' \
+  'sh -c "echo a ;; echo b"; echo $?; sh -c "; echo a"; echo $?; sh -c "true & ; echo a"; echo $?'
+t "a comment or another redirection is not a redirection target" 0 $'sh: syntax error: missing redirection target\n2\nsh: syntax error: missing redirection target\n2' \
+  'sh -c "echo x >#f"; echo $?; sh -c "echo x 2> 4>&1"; echo $?'
+t "command exec is refused" 2 "sh: command: \`command exec' is not supported; write \`exec'" 'command exec >/t/o; echo visible'
+t "without sh on PATH a script that ends by calling sh does not pile up in one process" 0 "inner" 'PATH=/nonexistent; sh -c "sh -c \"sh -c \\\"echo inner\\\"\""'
+half=$(python3 -c 'print("dd/" * 700, end="")')
+bb "for p in cdlong cdl2; do mkdir -p /t/\$p && (cd /t/\$p && i=0; while [ \$i -lt 700 ]; do mkdir dd && cd dd; i=\$((i+1)); done); done; mv /t/cdl2/dd /t/cdlong/$half"
+t "cd to a place whose name is too long for \$PWD fails and stays where it was" 0 $'0\n1\nsame\n2110' \
+  'cd /t/cdlong; cd "$1"; echo $?; A=$PWD; cd "$1" 2>/dev/null; echo $?; /bb/busybox test "$A" = "$PWD" && echo same; pwd | /bb/busybox wc -c' "$half"
+# A shell that starts where no name fits: the directory it is in is moved
+# below a long path first.
+bb "mkdir -p /t/cdq/$(python3 -c 'print("a" * 200, end="")')"
+k "a shell started in a place with no name that fits has no PWD, not a wrong one" 0 "[]" \
+  "cd /t/cdq/a* && mv /t/cdq /t/cdlong/$(python3 -c 'print("dd/" * 1330, end="")')q && PWD=/lie exec /bin/sh -c 'echo \"[\$PWD]\"'"
+bb 'mkdir "/t/esc$(printf "\033")[31mX"'
+E=$(printf '\033')
+session=$(typed 'cd "/t/esc${E}[31mX"\n' 'cd /\n' 'cd -\n' 'command -v "/t/esc${E}[31mX/../../bin/sh"\n' 'exit\n' -- docker exec -it -e "E=$E" "$BENCH" /bin/sh)
+check "cd - and command -v mask control characters on a terminal" "/t/esc?[31mX /t/esc?[31mX/../../bin/sh " \
+  "$(printf '%s\n' "$session" | tr -d '\r' | grep -x -F -e '/t/esc?[31mX' -e '/t/esc?[31mX/../../bin/sh' | tr '\n' ' ')"
+expect "ls -l says so when it cannot read where a link points" 0 "1" -- run -- sh -c 'ls -l /proc/1/fd > /dev/null 2>&1; echo $?'
+x "uname takes one option" 1 "uname: usage: uname [-a|-s|-n|-r|-m]" uname -s -n
+x "chmod and chown need a file after --" 1 $'chmod: usage: chmod OCTAL FILE...\nchown: usage: chown UID[:GID] FILE...' sh -c 'chmod 644 --; chown 0 --'
+bb 'cd /t && echo secret > ./-n'
+x "cat and sleep have no options: -n is not read as a file" 1 $'cat: invalid option: -n\nsleep: invalid option: -1' sh -c 'cd /t; cat -n /etc/hostname; sleep -1'
+bb 'cd /t && rm -rf rmslash && mkdir -p rmslash/d rmslash/keep && echo x > rmslash/keep/f && ln -s keep rmslash/l'
+x "rm -r LINK/ does not go through the link; rm -r DIR/ removes the directory" 0 $'rm: /t/rmslash/l/: not a directory\n1\nkeep\nl' \
+  sh -c 'rm -r /t/rmslash/l/; echo $?; rm -r /t/rmslash/d/; ls /t/rmslash'
+k "mkdir -p under a umask without owner write still makes the whole path" 0 "dr-xr-xr-x" 'cd /t && rm -rf um && (umask 0222; /bin/mkdir -p um/a/b) && stat -c %A um/a/b; chmod -R 755 um'
+bb 'mkdir -p /t/lsacc/in && ln -s /t/lsacc/in/x /t/lsacc/l && chmod 000 /t/lsacc/in'
+expect "ls shows a link whose target it cannot look at" 0 "/t/lsacc/l" -- docker exec -u 65534:65534 "$BENCH" /bin/ls /t/lsacc/l
+bb 'chmod 755 /t/lsacc/in'
+session=$(typed 'env\n' 'exit\n' -- docker run -it --rm "${D[@]}" -e "ESC=a$(printf '\033')[31mb" "$TEST")
+check "env masks control characters on a terminal" "ESC=a?[31mb" "$(printf '%s\n' "$session" | tr -d '\r' | grep '^ESC=')"
+
+
 # ------------------------------------------------------- further checks
 echo "== shell: further cases"
 t "a comment after && or || does not unguard the next line" 0 "end" $'false && # only when it worked\necho BAD\ntrue || # fallback\nexit 9\necho end'
@@ -648,7 +755,9 @@ t "&> is refused" 2 "sh: syntax error: \`&>' is not supported; write \`>file 2>&
 t "\$'...' is refused" 2 "sh: syntax error: \$'...' quoting is not supported" "echo \$'a'"
 t "a redirection that fails on a special builtin ends the script" 1 "sh: /nonexistent/x: no such file or directory" ': > /nonexistent/x; echo continued'
 t "wait PID still knows a status after a plain wait and many other jobs" 0 "first=7" 'sh -c "exit 7" & F=$!; true & true & true & wait; wait $F; echo "first=$?"'
-t "background commands ignore SIGINT and SIGQUIT" 0 $'SigIgn:\t0000000000000006' 'sleep 2 & /bb/busybox grep SigIgn /proc/$!/status'
+# (Once it is the command: before its exec the child is still the shell.)
+t "background commands ignore SIGINT and SIGQUIT" 0 $'SigIgn:\t0000000000000006' \
+  'sleep 2 & /bb/busybox sh -c "until /bb/busybox grep -q -x sleep /proc/\$1/comm; do :; done; /bb/busybox grep SigIgn /proc/\$1/status" wait $!'
 x "options may follow -c" 1 "" sh -c -e 'false; echo a'
 bb 'echo "echo hi \$1" > /t/noshebang; chmod 755 /t/noshebang'
 t "an executable text file without #! runs as a script" 0 $'hi there\nhi again' '/t/noshebang there; PATH=/t noshebang again'

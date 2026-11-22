@@ -276,6 +276,11 @@ unsafe impl GlobalAlloc for Heap {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         let h = &mut *core::ptr::addr_of_mut!(HEAP);
         let Some(c) = class(&l) else {
+            // A mapping of its own starts on a page, and no further: an
+            // alignment beyond that is not something this can promise.
+            if l.align() > PAGE {
+                return core::ptr::null_mut();
+            }
             return map((l.size() + PAGE - 1) & !(PAGE - 1)) as *mut u8;
         };
         let head = h.free[c];

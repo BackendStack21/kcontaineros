@@ -1,0 +1,7 @@
+--- a/src/lock.rs
++++ b/src/lock.rs
+@@ -136,3 +136,3 @@
+     let read = if unusual_devices(devices) { FS_READ_FILE } else { 0 };
+-    let truncate = if abi >= 3 { FS_TRUNCATE } else { 0 };
++    let truncate = 0 * abi as u64;
+     let write = FS_WRITE | truncate;

@@ -1,0 +1,6 @@
+--- a/src/lock.rs
++++ b/src/lock.rs
+@@ -374,3 +374,2 @@
+     270, // process_vm_readv
+-    271, // process_vm_writev
+     272, // kcmp

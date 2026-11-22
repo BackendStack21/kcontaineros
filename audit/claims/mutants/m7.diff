@@ -1,0 +1,7 @@
+--- a/src/lock.rs
++++ b/src/lock.rs
+@@ -210,3 +210,3 @@
+     allow(ruleset, b"/dev/pts", file);
+-    allow(ruleset, b"/dev/shm", read | write);
++    allow(ruleset, b"/dev/shm", read | write | FS_EXECUTE);
+     if read != 0 {

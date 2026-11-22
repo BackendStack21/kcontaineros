@@ -1,0 +1,7 @@
+--- a/src/lock.rs
++++ b/src/lock.rs
+@@ -360,3 +360,3 @@
+ /// clone(2) flags that create a namespace.
+-const CLONE_NEW_ANY: u32 = 0x7e02_0000;
++const CLONE_NEW_ANY: u32 = 0x1000_0000;
+ 

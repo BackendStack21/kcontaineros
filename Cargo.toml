@@ -1,6 +1,6 @@
 [package]
 name = "kcontaineros"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "A zero-dependency, Rust-based mini OS userland for containers (ARM64)"
 license = "MIT"

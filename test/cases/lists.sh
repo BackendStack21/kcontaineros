@@ -12,7 +12,7 @@ echo "status after skipped: $?"
 sh -c "exit 3"; echo "rc=$?"
 sh -c "exit 300"; echo "rc=$?"
 false; echo "rc=$?"
-echo a; echo b ; ;
+echo a; echo b ;
 : ignored args
 nope-command; echo "rc=$?"
 /nope/command; echo "rc=$?"

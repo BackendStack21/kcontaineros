@@ -1,0 +1,7 @@
+--- a/src/lock.rs
++++ b/src/lock.rs
+@@ -292,3 +292,3 @@
+ fn allow_path(ruleset: i32, path: &[u8], access: u64, is_dir: bool) -> bool {
+-    let dir_flags = sys::O_PATH | sys::O_DIRECTORY | sys::O_NOFOLLOW | sys::O_CLOEXEC;
++    let dir_flags = sys::O_PATH | sys::O_DIRECTORY | sys::O_CLOEXEC;
+     let mut fd = sys::open(b"/\0".as_ptr(), dir_flags, 0);

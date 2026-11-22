@@ -34,6 +34,7 @@ cleanup() {
   docker ps -aq --filter "name=^/kcos-.*-$ID\$" | xargs -r docker rm -f >/dev/null 2>&1
   docker rmi -f "$TEST" "$HTTP" "$REPRO" "$SEALED" "$SEALED-test" >/dev/null 2>&1
   [ -n "$COV" ] && docker volume rm -f "$VOL" >/dev/null 2>&1
+  rm -f "${ERR:-}"
 }
 trap cleanup EXIT
 
@@ -47,10 +48,29 @@ ko() {
 # check NAME EXPECTED ACTUAL
 check() { if [ "$2" = "$3" ]; then ok "$1"; else ko "$1" "$2" "$3"; fi; }
 # expect NAME RC OUTPUT -- COMMAND...   (stdout and stderr together, stdin empty)
+# Docker hands the two streams over separately, so which of two lines came
+# first is not something a check can rely on. OUTPUT has to be the lines of
+# stdout and the lines of stderr, each stream complete and in its order,
+# merged in some way.
+ERR=$(mktemp)
 expect() {
-  local name=$1 rc=$2 want=$3 out got
+  local name=$1 rc=$2 want=$3 out err got
   shift 4
-  out=$("$@" 2>&1 </dev/null); got=$?
+  out=$("$@" 2>"$ERR" </dev/null); got=$?
+  err=$(cat "$ERR")
+  if [ -z "$err" ] || python3 -c '
+import sys
+want, out, err = (a.split("\n") if a else [] for a in sys.argv[1:4])
+ways = {(0, 0)}
+for line in want:
+    ways = {(i + 1, j) for i, j in ways if i < len(out) and out[i] == line} | \
+           {(i, j + 1) for i, j in ways if j < len(err) and err[j] == line}
+sys.exit((len(out), len(err)) not in ways)' "$want" "$out" "$err"; then
+    [ -n "$err" ] && out=$want
+  else
+    out="$err${out:+
+$out}"
+  fi
   check "$name" "$want
 [rc $rc]" "$out
 [rc $got]"

@@ -185,6 +185,9 @@ pub fn main(args: Vec<Bytes>, env: Vec<Bytes>) -> i32 {
     let n = sys::getcwd(&mut cwd);
     if n > 1 {
         sh.setenv(&[b"PWD=", &cwd[..n as usize - 1]].concat());
+    } else {
+        // A place with no name that fits: better none than a wrong one.
+        sh.env.retain(|e| !e.starts_with(b"PWD="));
     }
 
     let mut i = 1;
@@ -255,7 +258,7 @@ pub fn main(args: Vec<Bytes>, env: Vec<Bytes>) -> i32 {
         }
         let Some(mut input) = read_line() else { break };
         // A line that ends inside a quote is not finished yet.
-        'more: while let Some(open) = sh.unfinished(&input) {
+        'more: while let Some(open) = sh.unfinished(&splice(&input)) {
             let quote = match open {
                 OPEN_SINGLE => Some(b'\''),
                 OPEN_DOUBLE => Some(b'"'),
@@ -268,15 +271,24 @@ pub fn main(args: Vec<Bytes>, env: Vec<Bytes>) -> i32 {
                 let Some(more) = read_line() else { break 'more };
                 input.push(b'\n');
                 input.extend_from_slice(&more);
-                // Only a line with the closing quote can end an open string:
-                // checking the others again would make long strings quadratic.
-                if !quote.is_some_and(|q| !more.contains(&q)) {
+                // Only a line that can end what is open is worth checking
+                // again: the closing quote of a string, the brace of `${`,
+                // something other than blanks after an operator. Checking
+                // every line would make long input quadratic.
+                let ends = match quote {
+                    Some(q) => more.contains(&q),
+                    None if open == OPEN_BRACE => more.contains(&b'}'),
+                    None if open == OPEN_BACKSLASH => !more.ends_with(b"\\"),
+                    None => !only_blank(&more) && !more.ends_with(b"\\"),
+                };
+                if ends {
                     break;
                 }
             }
         }
         // A script on stdin stops at its first syntax error: carrying on
         // would run lines that were meant to be guarded by the broken one.
+        let input = splice(&input);
         if !sh.syntax_ok(&input) {
             if !sh.interactive {
                 return 2;
@@ -361,6 +373,46 @@ fn is_blank(c: u8) -> bool {
     c == b' ' || c == b'\t' || c == b'\r'
 }
 
+/// Parameters every POSIX shell sets and this one does not: used in a
+/// script they would silently be empty.
+fn unsupported_parameter(name: &[u8]) -> PResult<()> {
+    match name {
+        b"LINENO" | b"OPTIND" | b"OPTARG" | b"PS4" => Err(b"$LINENO, $OPTIND, $OPTARG and $PS4 are not supported"),
+        _ => Ok(()),
+    }
+}
+
+/// `src` without its line continuations. A backslash-newline is removed
+/// before anything else is looked at, as POSIX has it, so that one inside
+/// a word (`i\` + `f`) leaves the word it would be without it. Only in
+/// single quotes and in comments is it kept as it is.
+fn splice(src: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(src.len());
+    let (mut i, mut double, mut word_start) = (0, false, true);
+    while i < src.len() {
+        let c = src[i];
+        let skip = continuation(&src[i..]);
+        if skip > 0 {
+            i += skip;
+            continue;
+        }
+        let mut end = i + 1;
+        if c == b'\\' {
+            end = (i + 2).min(src.len());
+        } else if c == b'"' {
+            double = !double;
+        } else if c == b'\'' && !double {
+            end = src[i + 1..].iter().position(|&q| q == b'\'').map_or(src.len(), |k| i + k + 2);
+        } else if c == b'#' && !double && word_start {
+            end = src[i..].iter().position(|&q| q == b'\n').map_or(src.len(), |k| i + k);
+        }
+        out.extend_from_slice(&src[i..end]);
+        word_start = !double && end == i + 1 && matches!(c, b' ' | b'\t' | b'\n' | b'\r' | b';' | b'&' | b'|' | b'<' | b'>' | b'(' | b')');
+        i = end;
+    }
+    out
+}
+
 /// The length of a line continuation at the start of `s`: a backslash and
 /// a newline, or with a carriage return between them in a CRLF script.
 fn continuation(s: &[u8]) -> usize {
@@ -377,8 +429,6 @@ fn skip_blanks(s: &[u8], i: &mut usize) {
     while *i < s.len() {
         if is_blank(s[*i]) {
             *i += 1;
-        } else if continuation(&s[*i..]) > 0 {
-            *i += continuation(&s[*i..]);
         } else {
             break;
         }
@@ -563,6 +613,7 @@ impl Shell {
 
     /// Run a whole script; returns the status of the last command.
     fn run(&mut self, src: &[u8]) -> i32 {
+        let src = &splice(src)[..];
         // Find every syntax error before anything has run.
         if !self.syntax_ok(src) {
             return 2;
@@ -828,7 +879,16 @@ impl Shell {
         if e == sys::ENOENT && !argv[0].contains(&b'/') {
             // Not on $PATH: fall back to the built-in implementation, so the
             // binary keeps working even without its symlinks.
+            // (As a new process image: a script that ends by calling
+            // itself must not pile up inside this one.)
             if &argv[0][..] == b"sh" {
+                let argz: Vec<Bytes> = argv.iter().map(|a| cz(a)).collect();
+                let envz: Vec<Bytes> = self.env.iter().map(|e| cz(e)).collect();
+                let mut argp: Vec<*const u8> = argz.iter().map(|a| a.as_ptr()).collect();
+                let mut envp: Vec<*const u8> = envz.iter().map(|e| e.as_ptr()).collect();
+                argp.push(core::ptr::null());
+                envp.push(core::ptr::null());
+                sys::execve(b"/proc/self/exe\0".as_ptr(), argp.as_ptr(), envp.as_ptr());
                 sys::exit(main(argv.to_vec(), self.env.clone()));
             }
             if let Some(code) = applets::run(argv, &self.env) {
@@ -924,18 +984,34 @@ impl Shell {
                 let mut buf = [0u8; 4096];
                 let n = sys::getcwd(&mut buf);
                 let old = if n > 1 { buf[..n as usize - 1].to_vec() } else { Vec::new() };
-                let e = sys::chdir(cz(dir).as_ptr());
+                // To come back if the new place turns out to have no name
+                // that $PWD could hold.
+                let here = sys::open(b".\0".as_ptr(), sys::O_PATH | sys::O_DIRECTORY | sys::O_CLOEXEC, 0);
+                let mut e = sys::chdir(cz(dir).as_ptr());
+                let n = if e < 0 { 0 } else { sys::getcwd(&mut buf) };
+                if e >= 0 && n <= 1 {
+                    e = if n < 0 { n } else { sys::ENOENT };
+                    if here >= 0 {
+                        sys::fchdir(here as i32);
+                    }
+                }
+                if here >= 0 {
+                    sys::close(here as i32);
+                }
                 if e < 0 {
                     eprint(&[b"sh: cd: ", dir, b": ", errstr(e), b"\n"]);
                     return 1;
                 }
-                let n = sys::getcwd(&mut buf);
-                if n > 1 {
-                    self.setenv(&[b"OLDPWD=", &old[..]].concat());
-                    self.setenv(&[b"PWD=", &buf[..n as usize - 1]].concat());
-                    if back {
-                        write_all(1, &[&buf[..n as usize - 1], b"\n"].concat());
+                self.setenv(&[b"OLDPWD=", &old[..]].concat());
+                self.setenv(&[b"PWD=", &buf[..n as usize - 1]].concat());
+                if back {
+                    let mut o = util::Out::new(1);
+                    if sys::isatty(1) {
+                        o.safe(&buf[..n as usize - 1]);
+                    } else {
+                        o.s(&buf[..n as usize - 1]);
                     }
+                    o.s(b"\n");
                 }
                 0
             }
@@ -953,6 +1029,10 @@ impl Shell {
                 let first = 1 + a.get(1).is_some_and(|arg| arg == b"--") as usize;
                 if first == 1 && a.get(1).is_some_and(|arg| arg.starts_with(b"-")) {
                     eprint(&[b"sh: export: ", &a[1], b": options are not supported\n"]);
+                    return self.misuse();
+                }
+                if a.len() <= first {
+                    eprint(&[b"sh: export: listing variables is not supported; use `env'\n"]);
                     return self.misuse();
                 }
                 for kv in &a[first..] {
@@ -1004,6 +1084,10 @@ impl Shell {
             b"set" => {
                 // set [-ex] [+ex] [--] [ARG...]: options, then, if anything
                 // follows them, new positional parameters.
+                if a.len() == 1 {
+                    eprint(&[b"sh: set: listing variables is not supported; use `env'\n"]);
+                    return self.misuse();
+                }
                 let mut k = 1;
                 // (`--`, or a lone `-` or `+`, ends the options.)
                 while k < a.len() && a[k].len() > 1 && matches!(a[k][0], b'-' | b'+') && a[k] != b"--" {
@@ -1101,6 +1185,13 @@ impl Shell {
                         };
                         match found {
                             Some(mut line) => {
+                                if sys::isatty(1) {
+                                    line.iter_mut().for_each(|c| {
+                                        if !(0x20..0x7f).contains(c) {
+                                            *c = b'?'
+                                        }
+                                    });
+                                }
                                 line.push(b'\n');
                                 status |= !write_all(1, &line) as i32;
                             }
@@ -1115,6 +1206,10 @@ impl Shell {
                     return 2;
                 }
                 let a = &a[first - 1..];
+                if a[1] == b"exec" {
+                    eprint(&[b"sh: command: `command exec' is not supported; write `exec'\n"]);
+                    return self.misuse();
+                }
                 // A builtin is run as one: `command cd DIR` has to change
                 // this shell's directory.
                 if is_builtin(&a[1]) {
@@ -1201,7 +1296,7 @@ impl Shell {
             };
             *i += if sep == Sep::Or || sep == Sep::And { 2 } else { 1 };
             if empty {
-                if !cmds.is_empty() || sep != Sep::Seq {
+                if !cmds.is_empty() || sep != Sep::Seq || op == b';' {
                     return Err(b"unexpected operator");
                 }
             } else {
@@ -1267,6 +1362,14 @@ impl Shell {
                 *i = j;
                 skip_blanks(s, i);
                 let start = *i;
+                // A comment, or another redirection (`2> 4>&1`), is no target.
+                let mut digits = start;
+                while digits < s.len() && s[digits].is_ascii_digit() {
+                    digits += 1;
+                }
+                if s.get(start) == Some(&b'#') || (digits > start && matches!(s.get(digits), Some(b'<' | b'>'))) {
+                    return Err(b"missing redirection target");
+                }
                 let words = self.parse_word(s, i, Word { nosplit: true, ..Word::default() })?;
                 if *i == start {
                     return Err(b"missing redirection target");
@@ -1437,6 +1540,8 @@ impl Shell {
                 Some(Value::One(flags.iter().filter(|f| f.0).map(|f| f.1).collect()))
             }
             b"PPID" => one(sys::getppid() as u64),
+            // Fixed: fields are always split on these.
+            b"IFS" => Some(Value::One(b" \t\n".to_vec())),
             _ => match parse_u64(name) {
                 Some(n) => self.args.get(n as usize).map(|v| Value::One(v.clone())),
                 None if name.iter().all(u8::is_ascii_digit) => None,
@@ -1453,10 +1558,7 @@ impl Shell {
 
     /// Expand the `$...` at `s[*i]` into `w`.
     fn dollar(&self, s: &[u8], i: &mut usize, quoted: bool, w: &mut Word) -> PResult<()> {
-        let mut j = *i + 1;
-        while continuation(&s[j..]) > 0 {
-            j += continuation(&s[j..]);
-        }
+        let j = *i + 1;
         let (value, next) = match s.get(j) {
             Some(b'(') => return Err(b"command substitution is not supported"),
             Some(b'{') => {
@@ -1496,6 +1598,7 @@ impl Shell {
                     Value::One(b) => b.is_empty(),
                     Value::Many(l) => l.is_empty(),
                 };
+                unsupported_parameter(name)?;
                 let value = match (self.param(name, &w.overlay), default) {
                     (Some(v), _) if !is_empty(&v) => v,
                     (_, Some(d)) => Value::One(d),
@@ -1511,6 +1614,7 @@ impl Shell {
                 while k < s.len() && is_name_char(s[k]) {
                     k += 1;
                 }
+                unsupported_parameter(&s[j..k])?;
                 (self.param(&s[j..k], &w.overlay).unwrap_or(Value::One(Vec::new())), k)
             }
             Some(b'\'') if !quoted => return Err(b"$'...' quoting is not supported"),

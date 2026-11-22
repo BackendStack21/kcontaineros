@@ -1,0 +1,47 @@
+m0   baseline  passed: 458  failed: 1
+       set aside (order of lines only): a shell that cannot fork says so and goes on
+m0b  baseline  passed: 458  failed: 1
+       set aside (also fails on unmodified sources): is PID 1 and the command is its child
+m0c  baseline  passed: 458  failed: 1
+       set aside (also fails on unmodified sources): is PID 1 and the command is its child
+m1   SURVIVED  passed: 456  failed: 3
+       set aside (racy, see RACY): background commands ignore SIGINT and SIGQUIT
+       set aside (order of lines only): a shell that cannot fork says so and goes on
+       set aside (order of lines only): a device passed in cannot be opened, for writing or for reading, whatever its permissions
+m2   KILLED    passed: 457  failed: 2
+       killed by: system calls for running code from memory, reaching other processes and new kernel interfaces are refused
+       set aside (order of lines only): a shell that cannot fork says so and goes on
+m3   SURVIVED  passed: 457  failed: 2
+       set aside (also fails on unmodified sources): is PID 1 and the command is its child
+       set aside (order of lines only): message queues cannot be created; shared memory can
+m4   KILLED    passed: 456  failed: 3
+       killed by: a top-level symlink into a program directory does not make it writable
+       killed by: a KCOS_EXEC entry that is a symlink is ignored, with a warning
+       set aside (order of lines only): a shell that cannot fork says so and goes on
+m5   KILLED    passed: 456  failed: 3
+       killed by: privileged root cannot reconfigure the kernel, leave its namespaces, change the image or run a new program
+       set aside (order of lines only): KCOS_EXEC names further directories; entries it cannot use are skipped with a warning
+       set aside (order of lines only): a device passed in cannot be opened, for writing or for reading, whatever its permissions
+m6   SURVIVED  passed: 458  failed: 1
+       set aside (order of lines only): a program directory below one that is missing, and a name too long to exist, are ignored
+m7   SURVIVED  passed: 458  failed: 1
+       set aside (also fails on unmodified sources): is PID 1 and the command is its child
+m8   SURVIVED  passed: 459  failed: 0
+m9   KILLED    passed: 453  failed: 6
+       killed by:   not even as root in a --privileged container
+       killed by: privileged root cannot reconfigure the kernel, leave its namespaces, change the image or run a new program
+       killed by: system calls for running code from memory, reaching other processes and new kernel interfaces are refused
+       killed by: without the system call filter nothing runs at all
+       set aside (also fails on unmodified sources): is PID 1 and the command is its child
+       set aside (order of lines only): privileged root cannot open the kernel's files or the host's devices for writing
+m10  KILLED    passed: 455  failed: 4
+       killed by: nested init kills leftovers that ignore SIGTERM
+       killed by: at a prompt a misused builtin does not end the shell, Ctrl-C reaches command, long messages are whole
+       killed by: a signal to nested init ends its patience with what is left
+       killed by:   and what that leaves behind when it is killed
+m11  SURVIVED  passed: 458  failed: 1
+       set aside (order of lines only): a shell that cannot fork says so and goes on
+m12  SURVIVED  passed: 458  failed: 1
+       set aside (order of lines only): a program directory below one that is missing, and a name too long to exist, are ignored
+m13  SURVIVED  passed: 458  failed: 1
+       set aside (order of lines only): a device passed in cannot be opened, for writing or for reading, whatever its permissions

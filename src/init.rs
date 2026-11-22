@@ -107,8 +107,14 @@ pub unsafe fn run(mut cmd: *const *const u8, envp: *const *const u8) -> ! {
         }
         if sig as usize != sys::SIGCHLD {
             sys::kill(child, sig as usize);
-            continue;
+            // A stopped command acts on this one only when it runs again.
+            if sig as usize == SIGTERM {
+                sys::kill(child, SIGCONT);
+            }
         }
+        // Whatever the signal was: the kernel hands out the lowest number
+        // first, so a stream of others must not keep the end of the command
+        // from being seen.
         loop {
             let mut status = 0;
             let pid = sys::wait4(-1, &mut status, sys::WNOHANG | sys::WUNTRACED);
@@ -122,7 +128,9 @@ pub unsafe fn run(mut cmd: *const *const u8, envp: *const *const u8) -> ! {
                 // The command was stopped rather than ended. If that was
                 // Ctrl-Z, nothing here could ever resume it: do it now.
                 let by = (status >> 8) & 0xff;
-                if by == SIGTSTP {
+                // The same goes for the terminal's other stop signals when
+                // init is PID 1 and they were sent from outside.
+                if by == SIGTSTP || (pid1 && (by == SIGTTIN || by == SIGTTOU)) {
                     sys::kill(-child, SIGCONT);
                 }
                 // Stopped for touching a terminal it does not own: init was
@@ -210,17 +218,22 @@ fn stop_leftovers(child: isize, tty_owner: i32, all: &u64) {
 /// anything the command left behind has init as its parent by now, whatever
 /// session or process group it moved itself to.
 fn signal_leftovers(child: isize, sig: usize) -> bool {
-    sys::kill(-child, sig);
     let me = sys::getpid() as u64;
     // Only a /proc that describes this PID namespace can be trusted with
     // process IDs: /proc/self has to be init.
     let mut link = [0u8; 24];
     let n = sys::readlink(b"/proc/self\0".as_ptr(), &mut link);
-    if n <= 0 || parse_u64(&link[..n as usize]) != Some(me) {
-        return false;
-    }
-    let proc_dir = sys::open(b"/proc\0".as_ptr(), sys::O_RDONLY | sys::O_DIRECTORY | sys::O_CLOEXEC, 0);
+    let proc_dir = if n > 0 && parse_u64(&link[..n as usize]) == Some(me) {
+        sys::open(b"/proc\0".as_ptr(), sys::O_RDONLY | sys::O_DIRECTORY | sys::O_CLOEXEC, 0)
+    } else {
+        -1
+    };
     if proc_dir < 0 {
+        // All that is left is the command's process group, by its number.
+        // (Only here: the command has been reaped, so the number is free
+        // to become some other group, and init's children found in /proc
+        // cannot change under it.)
+        sys::kill(-child, sig);
         return false;
     }
     let mut found = false;

@@ -1,0 +1,7 @@
+--- a/src/lock.rs
++++ b/src/lock.rs
+@@ -505,3 +505,2 @@
+     // PID 1's memory or environment through /proc.
+-    sys::prctl(PR_SET_DUMPABLE, 0);
+-}
++}

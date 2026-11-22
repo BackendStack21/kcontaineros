@@ -19,5 +19,5 @@ site-preview:
 # commit what tools/update-docs.sh changed, then deploy.
 site-deploy: build
 	tools/update-docs.sh
-	@git diff --quiet HEAD -- docs/ || { echo "docs/ differs from the last commit: review, commit, then run this again" >&2; exit 1; }
+	@test -z "$$(git status --porcelain --ignored -- docs/)" || { echo "docs/ differs from the last commit (changed, untracked or ignored files): review and commit, then run this again" >&2; exit 1; }
 	npx wrangler deploy

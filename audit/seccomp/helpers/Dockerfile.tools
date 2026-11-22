@@ -1,0 +1,26 @@
+# Build the two static helpers and extract the aarch64 syscall names.
+# rust:1-alpine is the image the project itself builds with and already holds
+# gcc and musl; "apk add gcc" on plain alpine does the same where there is
+# disk space for it.
+FROM rust:1-alpine AS build
+COPY dumpfilter.c sysprobe.c /src/
+RUN gcc -O1 -static -o /dumpfilter /src/dumpfilter.c && gcc -O1 -static -o /sysprobe /src/sysprobe.c
+# number<TAB>name, as musl names them for aarch64
+RUN printf '#include <sys/syscall.h>\n' | gcc -E -dM - | \
+    awk '$2 ~ /^__NR_/ && $3 ~ /^[0-9]+$/ { sub(/^__NR_/, "", $2); print $3 "\t" $2 }' | sort -n > /syscalls.tsv
+
+# The dumper runs in a privileged helper container that shares the target's PID namespace.
+FROM alpine:3 AS dump
+COPY --from=build /dumpfilter /dumpfilter
+COPY --from=build /syscalls.tsv /syscalls.tsv
+
+# The probe lives next to busybox in the audit image, in a KCOS_EXEC directory.
+FROM kcos-audit AS probe
+COPY --from=build /sysprobe /bb/sysprobe
+
+# The sealed image (init only) with the same tools, to dump and probe its filter too.
+FROM kcontaineros:sealed AS sealed
+COPY --from=kcos-audit /bb /bb
+COPY --from=build /sysprobe /bb/sysprobe
+ENV KCOS_EXEC=/bb
+USER 0
