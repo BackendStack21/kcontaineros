@@ -23,6 +23,8 @@ BENCH=kcos-bench-$ID          # long-lived container most checks exec into
 VOL=kcos-cov-$ID              # where instrumented processes leave their counters
 HTTP=kcos-http-$ID
 REPRO=kcos-repro-$ID
+# What marks a container as this run's, for the clean-up.
+LABEL=kcos-suite=$ID-$RANDOM$RANDOM
 pass=0
 fail=0
 
@@ -31,7 +33,7 @@ D=(--platform "$PLATFORM")
 [ -n "$COV" ] && D+=(-v "$VOL:/cov")
 
 cleanup() {
-  docker ps -aq --filter "name=^/kcos-.*-$ID\$" | xargs -r docker rm -f >/dev/null 2>&1
+  docker ps -aq --filter "label=$LABEL" | xargs -r docker rm -f >/dev/null 2>&1
   docker rmi -f "$TEST" "$HTTP" "$REPRO" "$SEALED" "$SEALED-test" >/dev/null 2>&1
   [ -n "$COV" ] && docker volume rm -f "$VOL" >/dev/null 2>&1
   rm -f "${ERR:-}"
@@ -116,7 +118,7 @@ start() {
   while [ "$1" != -- ]; do opts+=("$1"); shift; done
   shift
   name=kcos-c$RANDOM$RANDOM-$ID
-  docker run -d --name "$name" "${D[@]}" ${opts[@]+"${opts[@]}"} "$TEST" "$@" >/dev/null && echo "$name"
+  docker run -d --name "$name" --label "$LABEL" "${D[@]}" ${opts[@]+"${opts[@]}"} "$TEST" "$@" >/dev/null && echo "$name"
 }
 now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
 # typed INPUT... -- COMMAND...         drive a command through a terminal
@@ -148,7 +150,7 @@ if [ -n "$COV" ]; then
   docker volume create "$VOL" >/dev/null
   docker run --rm -v "$VOL:/cov" "$BUSYBOX" chmod 1777 /cov
 fi
-docker run -d --name "$BENCH" "${D[@]}" "$TEST" /bb/busybox sleep 86400 >/dev/null || exit 1
+docker run -d --name "$BENCH" --label "$LABEL" "${D[@]}" "$TEST" /bb/busybox sleep 86400 >/dev/null || exit 1
 bb 'mkdir -p /t /cases' && docker cp -q test/cases/. "$BENCH:/cases/" || exit 1
 
 . test/suite.sh
@@ -165,7 +167,9 @@ if [ -n "$COV" ]; then
     bin=/src/target/aarch64-unknown-linux-musl/debug/kcontaineros
     find /cov -name "*.profraw" > /tmp/list
     echo "profiles: $(wc -l < /tmp/list)"
-    "$tools/llvm-profdata" merge -sparse -f /tmp/list -o /tmp/merged.profdata
+    # A process killed while it writes its counters leaves a broken file:
+    # that one is left out, the others count.
+    "$tools/llvm-profdata" merge -sparse -failure-mode=all -f /tmp/list -o /tmp/merged.profdata 2>&1 | { grep -v "invalid instrumentation profile data" || true; }
     "$tools/llvm-cov" report "$bin" -instr-profile=/tmp/merged.profdata --ignore-filename-regex="/rustc/|/usr/local/"
     echo "--- uncovered lines"
     "$tools/llvm-cov" show "$bin" -instr-profile=/tmp/merged.profdata --ignore-filename-regex="/rustc/|/usr/local/" \

@@ -186,6 +186,13 @@ expect "system calls for running code from memory, reaching other processes and 
 REFUSED=$(sed -n '/^const DENIED/,/^];/s/^ *\([0-9][0-9]*\),.*/raw:\1/p' src/lock.rs | tr '\n' ' ')
 check "every system call on the filter's list is refused before the kernel looks at it" "$(echo $REFUSED | wc -w | tr -d ' ') errno 1" \
   "$(run "${PRIV[@]}" -- /bb/probe $REFUSED | cut -d' ' -f2- | sort | uniq -c | sed 's/^ *//')"
+# The namespace flags of clone, in a combination the kernel calls invalid
+# before it looks at anything else.
+NS="clone:20000 clone:4000000 clone:8000000 clone:10000000 clone:20000000 clone:40000000 clone:2000000"
+check "clone with any namespace flag is refused by the filter" "7 errno 1" \
+  "$(run "${PRIV[@]}" -- /bb/probe $NS | cut -d' ' -f2- | sort | uniq -c | sed 's/^ *//')"
+check "  control: without init the kernel calls each invalid" "7 errno 22" \
+  "$(run "${PRIV[@]}" --entrypoint /bb/probe -- $NS | cut -d' ' -f2- | sort | uniq -c | sed 's/^ *//')"
 # (Not vhangup, 58: it takes no arguments, so it would be carried out.)
 check "  control: without init the kernel answers each of them something else" "0" \
   "$(run "${PRIV[@]}" --entrypoint /bb/probe -- ${REFUSED/raw:58 /} | grep -c ': errno 1$')"
@@ -281,8 +288,8 @@ check "Ctrl-Z cannot freeze a foreground command" "[exit 0]" "$(printf '%s\n' "$
 
 # ------------------------------------------------------------ multi-call
 echo "== multi-call binary"
-x "--version" 0 "kcontaineros 0.2.1" kcontaineros --version
-x "-V" 0 "kcontaineros 0.2.1" kcontaineros -V
+x "--version" 0 "kcontaineros 1.0.0" kcontaineros --version
+x "-V" 0 "kcontaineros 1.0.0" kcontaineros -V
 x "--list" 0 "init sh $APPLETS" /bb/busybox sh -c 'kcontaineros --list | /bb/busybox tr "\n" " " | /bb/busybox sed "s/ $//"'
 USAGE=$'usage: kcontaineros init [--] COMMAND [ARGS...]\n       kcontaineros APPLET [ARGS...]\n       kcontaineros --list | --version'
 x "--help" 0 "$USAGE" kcontaineros --help
@@ -417,7 +424,7 @@ t "existing link name" 1 "ln: /t/ln/sym: file exists" 'ln -s x /t/ln/sym'
 echo "== ls"
 bb 'mkdir -p /t/ls/sub /t/ls/locked && cd /t/ls && echo 12345 > file && touch .hidden sub/inner locked/secret && ln -s file link && mkfifo pipe && chmod 444 locked'
 t "names, sorted, hidden files left out" 0 $'file\nlink\nlocked\npipe\nsub' 'ls /t/ls'
-t "-a shows hidden files" 0 $'.hidden\nfile\nlink\nlocked\npipe\nsub' 'ls -a /t/ls'
+t "-a shows hidden files" 0 $'.\n..\n.hidden\nfile\nlink\nlocked\npipe\nsub' 'ls -a /t/ls'
 t "the current directory by default" 0 "inner" 'cd /t/ls/sub; ls'
 t "-l: type, permissions, owner, size, link target" 0 \
   $'-rw-r--r-- 0 0 6 file\nlrwxrwxrwx 0 0 4 link -> file\nprw-r--r-- 0 0 0 pipe' \
@@ -684,6 +691,9 @@ t "an empty command before ; is a syntax error" 0 $'sh: syntax error: unexpected
   'sh -c "echo a ;; echo b"; echo $?; sh -c "; echo a"; echo $?; sh -c "true & ; echo a"; echo $?'
 t "a comment or another redirection is not a redirection target" 0 $'sh: syntax error: missing redirection target\n2\nsh: syntax error: missing redirection target\n2' \
   'sh -c "echo x >#f"; echo $?; sh -c "echo x 2> 4>&1"; echo $?'
+t "an assignment whose redirection fails is not made; one whose redirection works is" 0 $'sh: /nonexistent/f: no such file or directory\n[] 1\n[2]' \
+  'X=1 </nonexistent/f; echo "[$X] $?"; X=2 >/dev/null; echo "[$X]"'
+x "ls -a lists . and .. too" 0 $'.\n..\n.h\nv' sh -c 'mkdir /tmp/lsa; cd /tmp/lsa; touch .h v; ls -a; cd /; rm -r /tmp/lsa'
 t "command exec is refused" 2 "sh: command: \`command exec' is not supported; write \`exec'" 'command exec >/t/o; echo visible'
 t "without sh on PATH a script that ends by calling sh does not pile up in one process" 0 "inner" 'PATH=/nonexistent; sh -c "sh -c \"sh -c \\\"echo inner\\\"\""'
 half=$(python3 -c 'print("dd/" * 700, end="")')
@@ -922,7 +932,7 @@ if ! log=$(docker build --platform "$PLATFORM" --build-arg "BASE=$IMG" -t "$HTTP
   printf '%s\n' "$log" | tail -20; ko "example image builds" "success" "failure"
 else
   ok "a Dockerfile with a shell-form RUN builds on the image"
-  c=$(docker run -d --name "kcos-web-$ID" "${D[@]}" -p 127.0.0.1::8080 "$HTTP")
+  c=$(docker run -d --name "kcos-web-$ID" --label "$LABEL" "${D[@]}" -p 127.0.0.1::8080 "$HTTP")
   port=$(docker port "$c" 8080 | sed 's/.*://')
   body=""; for _ in $(seq 1 50); do body=$(curl -fsS --max-time 2 "http://127.0.0.1:$port/" 2>/dev/null) && break; sleep 0.2; done
   check "a Rust HTTP server answers" "Hello from kContainerOS" "$body"

@@ -62,6 +62,16 @@ fn main() {
                 }
                 pid
             }
+            // clone(FLAGS | CLONE_THREAD) without CLONE_SIGHAND: the kernel
+            // says "invalid" before it looks at anything else, so "not
+            // permitted" can only be the filter's answer to FLAGS.
+            flags if flags.starts_with("clone:") => match usize::from_str_radix(&flags[6..], 16) {
+                Ok(bits) => syscall(220, bits | 0x10000, 0),
+                Err(_) => {
+                    println!("{name}: unknown probe");
+                    continue;
+                }
+            },
             raw if raw.starts_with("raw:") => match raw[4..].parse() {
                 Ok(nr) => syscall_invalid(nr),
                 Err(_) => {

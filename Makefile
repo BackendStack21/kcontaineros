@@ -11,13 +11,15 @@ test:
 coverage:
 	COV=1 ./test/e2e.sh
 
+WRANGLER = 4.166.0
+
 # The landing page (docs/) on Cloudflare Workers static assets; see wrangler.jsonc.
 site-preview:
-	npx wrangler dev
+	npx wrangler@$(WRANGLER) dev
 
 # Refuses to publish a page whose embedded binary is not the one just built:
 # commit what tools/update-docs.sh changed, then deploy.
 site-deploy: build
 	tools/update-docs.sh
 	@test -z "$$(git status --porcelain --ignored -- docs/)" || { echo "docs/ differs from the last commit (changed, untracked or ignored files): review and commit, then run this again" >&2; exit 1; }
-	npx wrangler deploy
+	npx wrangler@$(WRANGLER) deploy

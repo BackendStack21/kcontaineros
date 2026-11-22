@@ -80,7 +80,7 @@ The table row says reading or writing another process's memory is refused. The f
 Reproduction:
 
 ```
-# from the repository root
+cd .
 KEEP=1 audit/seccomp/run.sh    # builds kcos-audit-seccomp-probe (kcos-audit + audit/seccomp/helpers/sysprobe.c in /bb)
 timeout 120 docker run --rm --platform linux/arm64 --user 65534:65534 kcos-audit-seccomp-probe /bb/sysprobe mem
 timeout 120 docker run --rm --platform linux/arm64 --user 0:0 kcos-audit-seccomp-probe /bb/sysprobe mem
@@ -104,7 +104,7 @@ lockdown() returns before PR_SET_NO_NEW_PRIVS, confine_files and install_filter 
 Reproduction:
 
 ```
-# from the repository root
+cd .
 KEEP=1 audit/seccomp/run.sh    # or: audit/seccomp/extra.sh once the helper images exist
 timeout 120 docker run --rm --platform linux/arm64 --security-opt seccomp=audit/seccomp/helpers/ealready.json kcos-audit-seccomp-probe /bb/busybox sh -c "/bb/busybox grep -E 'NoNewPrivs|Seccomp|CapEff' /proc/self/status; /bb/sysprobe raw 279; /bb/busybox cp /bb/busybox /tmp/busybox && /tmp/busybox echo 'A COPY OF BUSYBOX IN /tmp WAS STARTED'"
 # control: the same command without --security-opt

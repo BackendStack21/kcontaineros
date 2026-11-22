@@ -2,7 +2,7 @@
 
 An end-to-end audit of the release tagged `v0.2.0` (commit `deffcb4`), run on
 22 November 2026, and what was done about what it found. The fixes are in
-0.2.1.
+1.0.0. A summary is in [`AUDIT.md`](../AUDIT.md).
 
 Everything here can be run again: each track left its harness in its
 directory, and the checks that came out of the audit are in `test/suite.sh`.
@@ -100,9 +100,8 @@ the defects:
 
 ## What was done
 
-36 findings were fixed in code or in the suite, 7 by correcting the
-documents, 4 in part; 6 are accepted as they are, 1 is open, and 10 needed
-no change.
+43 findings were fixed in code or in the suite and 7 by correcting the
+documents; 3 are accepted as they are, 1 is open, and 10 needed no change.
 
 | Track | ID | Severity | Finding | Outcome |
 | --- | --- | --- | --- | --- |
@@ -125,10 +124,10 @@ no change.
 | init | INIT-3 | low | A nested init keeps signalling the command's process group after reaping it; a reused PID gets its SIGKILL | **Fixed.** After the command is reaped its process group is signalled by number only when `/proc` cannot be used. |
 | init | INIT-4 | low | A nested init kills children it inherited from the program that exec'ed it | **Documented.** A nested init stops every child it has. |
 | shell | SH-02 | low | $IFS, $LINENO, $OPTIND, $PS4 expand to nothing, and `set` / `export` without operands print nothing with status 0 | **Fixed.** `$IFS` has its fixed value; `$LINENO`, `$OPTIND`, `$OPTARG` and `$PS4` are syntax errors; `set` and `export` without operands are errors. |
-| shell | SH-03 | low | Superlinear time on small input: a command left open across many lines on stdin, and many assignment prefixes on one command | **Partly fixed.** See memory M-4. |
+| shell | SH-03 | low | Superlinear time on small input: a command left open across many lines on stdin, and many assignment prefixes on one command | **Fixed.** See memory M-4. |
 | shell | SH-05 | low | `cd -` and `command -v` write names to a terminal unfiltered | **Fixed.** Both mask control characters on a terminal. |
 | shell | SH-06 | low | Syntax that POSIX shells reject is accepted, twice with another meaning | **Fixed.** An empty command before `;`, a comment as a redirection target and a redirection as a target are syntax errors. |
-| shell | SH-07 | low | `command exec REDIRECTION` does not keep the redirection; an assignment is kept when its redirection fails | **Partly fixed.** `command exec` is refused. An assignment is still kept when the redirection of the same empty command fails. |
+| shell | SH-07 | low | `command exec REDIRECTION` does not keep the redirection; an assignment is kept when its redirection fails | **Fixed.** `command exec` is refused, and an assignment is made only when the redirections written with it work. |
 | utils | UTILS-2 | low | mkdir -p under a umask without owner write/search can chmod a directory outside the operand | **Fixed.** Parents are created with the right mode; nothing is repaired by path afterwards. |
 | utils | UTILS-3 | low | uname looks only at its first argument: further options are ignored silently | **Fixed.** `uname` takes one option; more is a usage error. |
 | utils | UTILS-4 | low | chmod MODE -- and chown OWNER -- exit 0 without a file operand | **Fixed.** The file operand is required after `--` too. |
@@ -137,16 +136,16 @@ no change.
 | memory | M-1 | low | Shell recurses into itself in-process when `sh` is not on PATH, until the stack overflows (SIGSEGV) | **Fixed.** The fallback for `sh` starts a new process image through `/proc/self/exe`. |
 | memory | M-2 | low | `rm -r` overflows the stack on deep trees when the stack limit is below about 1 MiB | **Fixed.** See utils UTILS-7. |
 | memory | M-3 | low | `cd` into a directory whose path is 4096 bytes or longer succeeds but leaves $PWD and $OLDPWD stale | **Fixed.** `cd` fails and returns to where it was when the new place has no name that fits; at start-up `PWD` is unset then. |
-| memory | M-4 | low | Two shell inputs take time quadratic in their size | **Partly fixed.** Unfinished input on stdin is checked again only when a line can end it. Many assignment prefixes on one command still cost quadratic time. |
+| memory | M-4 | low | Two shell inputs take time quadratic in their size | **Fixed.** Unfinished input on stdin is checked again only when a line can end it, and earlier assignments of a command are passed on by reference. |
 | supply | S1 | low | site-deploy guard does not see untracked or ignored files in docs/ | **Fixed.** `make site-deploy` refuses on untracked and ignored files in `docs/` too. |
-| supply | S2 | low | Untracked files under rootfs/ are shipped in the image | **Accepted.** The suite compares the image's file list with a fixed list, so a stray file fails `make test`. |
+| supply | S2 | low | Untracked files under rootfs/ are shipped in the image | **Fixed.** `tools/mkrootfs.sh` copies the four files by name. |
 | claims | C-02 | low | Mutant survives: process_vm_writev removed from the refusal list | **Fixed.** The suite calls every number on the filter's list with arguments no kernel accepts, with a control. |
 | claims | C-05 | low | Mutant survives: /dev/shm granted execute (only visible with an exec-mounted /dev/shm) | **Fixed.** A program is run from an exec-mounted `/dev/shm`, with a control. |
-| claims | C-07 | low | Three further mutants survive (KCOS_DEV symlink, namespace flags of clone, five calls the suite attacks with busybox) | **Partly fixed.** The sweep of C-02 and a check for a symbolic link in `KCOS_DEV` cover two of the three. The namespace flags of `clone` other than `CLONE_NEWUSER` cannot be told apart from the kernel's own refusal. |
+| claims | C-07 | low | Three further mutants survive (KCOS_DEV symlink, namespace flags of clone, five calls the suite attacks with busybox) | **Fixed.** The sweep of C-02, a check for a symbolic link in `KCOS_DEV`, and `clone` called with each namespace flag in a combination the kernel calls invalid before anything else. |
 | claims | C-09 | low | `make test` is not reliably green: the unmodified sources failed one check in 3 of 3 runs | **Fixed.** Checks no longer depend on the order of two streams, on a PID, or on reading a child's state before its exec. |
 | claims | C-10 | low | README: "The top-level directory of an ignored entry is not writable all the same" is false for entries with a trailing slash, `.` or `..` | **Fixed.** Same change as escape-user F1. |
 | claims | C-12 | low | Suite checks that prove less than their name says | **Open.** The terminal checks still compare selected lines of a session, and "nobody cannot change the image" has no control. |
-| claims | C-15 | low | `ls -a` leaves out `.` and `..`; `set` without arguments prints nothing | **Fixed.** `set` without operands is an error; that `ls -a` leaves out `.` and `..` is documented. |
+| claims | C-15 | low | `ls -a` leaves out `.` and `..`; `set` without arguments prints nothing | **Fixed.** `set` without operands is an error; `ls -a` lists `.` and `..`. |
 | landlock | F2 | info | Landlock fails open with only a warning on non-kernel ruleset-build failure | **Fixed.** With Landlock present, a ruleset that cannot be created or applied ends init with status 125. |
 | escape-root | ESCROOT-2 | info | Any process under init can change PID 1's limits and scheduling and have the kernel kill it (container exits 137) (reproduced, not a defect) | **No change.** Not a defect: any process may ask the kernel to limit PID 1; the container then ends. |
 | escape-root | ESCROOT-5 | info | As root under init, a program carrying file capabilities with the effective bit cannot be started at all | **No change.** A consequence of `no_new_privs` with an empty bounding set. |
@@ -161,17 +160,17 @@ no change.
 | memory | M-5 | info | Allocator ignores alignments above 4096 for requests above 64 KiB (latent) | **Fixed.** A request aligned beyond a page that needs its own mapping is refused. |
 | memory | M-6 | info | Safe syscall wrappers with unchecked pointer contracts (reproduced, not a defect) | **No change.** Not a defect. |
 | memory | M-7 | info | Hardening details not mentioned in the README (reproduced, not a defect) | **No change.** Not a defect. |
-| supply | S3 | info | Deploy tool is unpinned: `npx wrangler` with no package.json or lockfile | **Accepted.** The page is deployed by a push to `main`; `npx wrangler` is the by-hand route. |
+| supply | S3 | info | Deploy tool is unpinned: `npx wrangler` with no package.json or lockfile | **Fixed.** The Makefile names the version of `wrangler` it runs. |
 | supply | S4 | info | Build is not hermetic; a toolchain pin mismatch would fetch an unpinned compiler | **Accepted.** The build needs the network for the pinned base image only; the toolchain pin and the Dockerfile agree. |
 | supply | S5 | info | Git history contains a compiled .pyc with the maintainer's absolute checkout path | **Accepted.** In history only; the file is no longer tracked. |
-| supply | S6 | info | test/e2e.sh cleanup removes any container named kcos-*-<PID>, and a default run retags `kcontaineros` | **Accepted.** A container of another tool named `kcos-…-<PID of the suite>` would be removed. |
+| supply | S6 | info | test/e2e.sh cleanup removes any container named kcos-*-<PID>, and a default run retags `kcontaineros` | **Fixed.** The suite labels its containers and removes them by label. |
 | supply | S7 | info | CSP relies on script-src 'unsafe-inline'; font stylesheet loaded cross-origin without integrity | **Accepted.** The page has no user input and no third-party script. |
 | supply | S8 | info | Environment: the shared Docker VM clock was repeatedly at 2001-01-01 during the audit (not reproduced) | **Fixed.** Caused by the suite itself; see claims C-08. |
 | claims | C-11 | info | `test` is not a syntax error: a script using it runs on and takes the failure branch (reproduced, already documented) | **No change.** Documented. |
 | claims | C-13 | info | "Forwards every signal": SIGCHLD is not forwarded (reproduced, not a defect) | **No change.** Not a defect. |
 | claims | C-14 | info | /dev/termination-log is on the device allowlist and no document lists it | **Fixed.** Allowed only where it is a regular file, and listed in the documents. |
 
-After the fixes `make test` passes 500 checks (459 before) and
+After the fixes `make test` passes 504 checks (459 before) and
 `make coverage` reaches 99% of lines; each new check belongs to a finding
 above. The harnesses for the three high findings were run again on the
 fixed image: the swap under `rm -r DIR/` lost nothing in 600 rounds (30 of
@@ -189,13 +188,6 @@ checks it.
 - **The suite's terminal checks** compare selected lines of a session,
   not the whole of it (C-12), and one check on the image's files has no
   control.
-- **The namespace flags of `clone`** other than `CLONE_NEWUSER`: the
-  filter refuses them, the kernel would too for lack of capabilities, and
-  no check can tell which of the two answered (C-07).
-- **Quadratic time** in the shell for thousands of assignment prefixes on
-  one command (M-4). Only whoever writes the script waits.
-- **An assignment is kept when the redirection of the same empty command
-  fails** (SH-07), where other shells drop it.
 - **Not covered at all:** other kernels and Landlock versions, a Linux
   host with native bind mounts, Kubernetes, user-namespace remapping,
   gVisor or Kata as runtime, and the kernel itself.

@@ -11,10 +11,13 @@ bin=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 dest=$2
 here=$(cd "$(dirname "$0")/.." && pwd)
 
-mkdir -p "$dest"
-cp -R "$here/rootfs/." "$dest/"
+# These files and no others: whatever else lies about in rootfs/ (an
+# editor's backup, a .DS_Store) does not belong in an image.
+mkdir -p "$dest/etc"
+for f in group nsswitch.conf os-release passwd; do
+    cp "$here/rootfs/etc/$f" "$dest/etc/$f"
+done
 cd "$dest"
-find . -name .DS_Store -exec rm -f {} +
 # One version number, the crate's.
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$here/Cargo.toml" | head -1)
 [ -n "$version" ] || { echo "mkrootfs: no version in Cargo.toml" >&2; exit 1; }

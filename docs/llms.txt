@@ -26,6 +26,10 @@ Applied by init to itself before it starts the command, enforced by the kernel, 
 - seccomp filter: `ptrace`, `process_vm_readv`/`process_vm_writev`, new namespaces, mounts, `bpf`, `io_uring`, `memfd_create` and similar are refused.
 - The image runs as `nobody` (65534) and its files are read-only.
 
+## Audit
+
+An end-to-end security audit of version 0.2.0 found no escape and no privilege gain; three documented security claims were false and are fixed in 1.0.0. It was carried out by an AI model, not by an independent party. Summary: https://github.com/BackendStack21/kcontaineros/blob/main/AUDIT.md
+
 ## What it does not do
 
 - It is not a guarantee against kernel bugs.

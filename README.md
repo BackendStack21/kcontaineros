@@ -105,9 +105,11 @@ inherits them. None can be undone from inside.
 hand over (root, `--privileged`, Docker's own filter switched off) and runs
 the same attempts without init as a control, where they succeed.
 
-[`audit/`](audit/README.md) holds an end-to-end audit of the image: its
-method, every finding and the harnesses to run it again. It was carried out
-by an AI model, not by an independent party.
+[`AUDIT.md`](AUDIT.md) summarises an end-to-end security audit of the
+image: no escape and no privilege gain were found, three security claims
+were false and are fixed. [`audit/`](audit/README.md) has the method, every
+finding and the harnesses to run it again. It was carried out by an AI
+model, not by an independent party.
 
 How the binary itself is built:
 
@@ -496,7 +498,7 @@ that is reasoning, not a result.
 | Shell | Globbing (`*`, `?`, `[`) and `~` | No | Syntax error when unquoted; quote them to pass them literally. |
 | Shell | `&>file`, `$'…'` | No | Syntax error; write `>file 2>&1`. |
 | Shell | `[` and `test` | No | There is no such command. |
-| Utilities | `cat chmod chown cp echo env false kill ln ls mkdir mv ps pwd rm sleep touch true uname` | Yes | Common flags only, such as `ls -la`, `rm -rf`, `mkdir -p`, `ln -s`, `chown UID:GID`, `env -i -u NAME NAME=value command`, `echo -ne`, `kill -s TERM`, `sleep 1.5`, `sleep 2m`, `sleep infinity`. `--` ends options; an unknown option is an error, for the tools without options (`cat`, `sleep`) too. `uname` takes one option. `ls -a` shows hidden names but not `.` and `..`. `mv` does not cross filesystems. |
+| Utilities | `cat chmod chown cp echo env false kill ln ls mkdir mv ps pwd rm sleep touch true uname` | Yes | Common flags only, such as `ls -la`, `rm -rf`, `mkdir -p`, `ln -s`, `chown UID:GID`, `env -i -u NAME NAME=value command`, `echo -ne`, `kill -s TERM`, `sleep 1.5`, `sleep 2m`, `sleep infinity`. `--` ends options; an unknown option is an error, for the tools without options (`cat`, `sleep`) too. `uname` takes one option. `mv` does not cross filesystems. |
 | Utilities | `cp -r`, `chmod u+x`, `grep`, `sed`, `tar`, `wget` and the rest | No | |
 | System | Package manager | No | Add files with `COPY`. |
 | System | CA certificates, timezone data, `/etc/services` | No | Copy them in if needed. |
@@ -506,12 +508,12 @@ that is reasoning, not a result.
 ## Compared with Alpine
 
 Alpine is the usual small base image, so it is the natural reference. Both
-were measured on the same machine: Alpine 3.24.4 and kContainerOS 0.2.1 on
+were measured on the same machine: Alpine 3.24.4 and kContainerOS 1.0.0 on
 Docker 29.9.3, linux/arm64.
 
 | | kContainerOS | Alpine 3.24 |
 | --- | --- | --- |
-| Image size (`docker images`) | 245 kB | 13.6 MB |
+| Image size (`docker images`) | 246 kB | 13.6 MB |
 | Root filesystem layer | 184 kB | 9.31 MB |
 | Userland | one 95 kB Rust binary | busybox, 919 kB |
 | Utilities | 19, plus `sh` and `init` | 304 busybox applets |
@@ -602,7 +604,8 @@ docs/             the site at kcos.21no.de: index.html, 404.html, share image, _
                   robots.txt, sitemap.xml, llms.txt
 wrangler.jsonc    Cloudflare configuration that serves docs/
 AGENTS.md         how to change the project: rules, checks, release steps
-audit/            the security audit of 0.2.0: method, findings, harnesses to run it again
+AUDIT.md          summary of the security audit
+audit/            the audit itself: method, findings, harnesses to run it again
 tools/update-docs.sh  re-embeds the built binary into docs/index.html and redraws it in the
                   share image (tools/update-og.py); run it after a rebuild
 ```

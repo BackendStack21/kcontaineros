@@ -21,7 +21,7 @@ src/applets.rs  utilities
 src/util.rs     shared helpers
 tools/          mkrootfs.sh (image contents), update-docs.sh and update-og.py (site)
 test/           e2e.sh runs suite.sh against real containers; cases/ are shell scripts
-audit/          the security audit of 0.2.0: method, findings, harnesses
+audit/          the security audit: method, findings, harnesses (summary in AUDIT.md)
 docs/           the landing page served at kcos.21no.de
 ```
 

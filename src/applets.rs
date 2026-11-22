@@ -654,6 +654,10 @@ fn ls(a: &[Vec<u8>], _e: &[Vec<u8>]) -> i32 {
                     ls.out.s(b":\n");
                 }
                 listed = true;
+                if all {
+                    entries.push(b".".to_vec());
+                    entries.push(b"..".to_vec());
+                }
                 entries.sort_unstable();
                 for n in &entries {
                     if all || n[0] != b'.' {

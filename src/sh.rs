@@ -24,6 +24,7 @@ use alloc::vec::Vec;
 type Bytes = Vec<u8>;
 type PResult<T> = Result<T, &'static [u8]>;
 
+#[derive(Clone)]
 struct Redir {
     fd: i32,
     /// `<` read, `>` truncate, `a` append, `d` duplicate (`N>&M`)
@@ -60,7 +61,7 @@ enum Sep {
 
 /// The fields produced by expanding one word.
 #[derive(Default)]
-struct Word {
+struct Word<'a> {
     fields: Vec<Bytes>,
     cur: Bytes,
     /// `cur` is a field even if empty (e.g. `""`)
@@ -71,14 +72,14 @@ struct Word {
     /// split into fields.
     nosplit: bool,
     /// Assignments earlier in the same command, which a later value sees.
-    overlay: Vec<Bytes>,
+    overlay: &'a [Bytes],
     /// How many `${NAME:-default}` enclose this word.
     depth: usize,
     /// The value of an assignment, where `~` also counts after `=` and `:`.
     assign: bool,
 }
 
-impl Word {
+impl Word<'_> {
     fn end_field(&mut self) {
         if self.has {
             self.fields.push(core::mem::take(&mut self.cur));
@@ -748,12 +749,19 @@ impl Shell {
         if cmds.len() == 1 && !background {
             let c = &cmds[0];
             if c.argv.is_empty() {
+                // With redirections, they are tried first (and undone
+                // again): an assignment whose redirection fails is not made.
+                if !c.redirs.is_empty() {
+                    let probe = Cmd { argv: vec![b"command".to_vec(), b":".to_vec()], redirs: c.redirs.clone(), ..Cmd::default() };
+                    let status = self.builtin_redirected(&probe);
+                    if status != 0 {
+                        return status;
+                    }
+                }
                 for a in &c.assigns {
                     self.setenv(a);
                 }
-                if c.redirs.is_empty() {
-                    return 0;
-                }
+                return 0;
             } else if is_builtin(&c.argv[0]) {
                 // Assignments stay after a special builtin, as POSIX says,
                 // and last only for the call of an ordinary one.
@@ -1393,7 +1401,7 @@ impl Shell {
                     }
                     let mut kv = s[*i..=k].to_vec();
                     *i = k + 1;
-                    let value = Word { nosplit: true, assign: true, overlay: cmd.assigns.clone(), ..Word::default() };
+                    let value = Word { nosplit: true, assign: true, overlay: &cmd.assigns, ..Word::default() };
                     kv.extend(self.parse_word(s, i, value)?.into_iter().flatten());
                     cmd.assigns.push(kv);
                     cmd.seen = true;
@@ -1599,7 +1607,7 @@ impl Shell {
                     Value::Many(l) => l.is_empty(),
                 };
                 unsupported_parameter(name)?;
-                let value = match (self.param(name, &w.overlay), default) {
+                let value = match (self.param(name, w.overlay), default) {
                     (Some(v), _) if !is_empty(&v) => v,
                     (_, Some(d)) => Value::One(d),
                     (v, None) => v.unwrap_or(Value::One(Vec::new())),
@@ -1607,7 +1615,7 @@ impl Shell {
                 (value, close + 1)
             }
             Some(&c) if matches!(c, b'?' | b'$' | b'#' | b'@' | b'*' | b'!' | b'-') || c.is_ascii_digit() => {
-                (self.param(&s[j..=j], &w.overlay).unwrap_or(Value::One(Vec::new())), j + 1)
+                (self.param(&s[j..=j], w.overlay).unwrap_or(Value::One(Vec::new())), j + 1)
             }
             Some(&c) if is_name_start(c) => {
                 let mut k = j;
@@ -1615,7 +1623,7 @@ impl Shell {
                     k += 1;
                 }
                 unsupported_parameter(&s[j..k])?;
-                (self.param(&s[j..k], &w.overlay).unwrap_or(Value::One(Vec::new())), k)
+                (self.param(&s[j..k], w.overlay).unwrap_or(Value::One(Vec::new())), k)
             }
             Some(b'\'') if !quoted => return Err(b"$'...' quoting is not supported"),
             _ => {
@@ -1670,7 +1678,7 @@ impl Shell {
             return Err(b"${NAME:-default} is nested too deeply");
         }
         let depth = outer.depth + 1;
-        let mut out = Word { nosplit: true, overlay: outer.overlay.clone(), depth, ..Word::default() };
+        let mut out = Word { nosplit: true, overlay: outer.overlay, depth, ..Word::default() };
         if d.first() == Some(&b'~') {
             return Err(b"`~' expansion is not supported; use $HOME or quote it");
         }
