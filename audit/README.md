@@ -48,7 +48,7 @@ one day.
 | [utils](utils/RESULT.md) | Are the utilities safe on hostile trees? | Comparison with busybox on generated trees; a race harness that swaps directories for links under `rm`, `cp`, `mv`, `mkdir -p`; terminal output; option and number parsing. |
 | [memory](memory/RESULT.md) | Where Rust's guarantees stop | Every `unsafe` block and kernel structure checked against its contract; the entry code and allocator; panics, stack depth and memory limits provoked; the ELF file inspected. |
 | [supply](supply/RESULT.md) | Is what ships what the sources say? | Two builds from scratch compared byte for byte; pinned inputs; the image's contents; the repository and its history; the site's headers and scripts against the live site. |
-| [claims](claims/RESULT.md) | Do the documents and the test suite tell the truth? | Every checkable claim of the README, the page and `llms.txt` tested by hand; the suite run against 16 mutants of the lockdown to see which it misses. |
+| [claims](claims/RESULT.md) | Do the documents and the test suite tell the truth? | Every checkable claim of the README, the page and `llms.txt` tested by hand; the suite run against 13 mutants of the lockdown to see which it misses, and three times against the unmodified sources as a baseline. |
 
 Each directory holds `RESULT.md` (what was exercised, what held, what was
 not tested, every finding with its reproduction and the reviewer's
@@ -90,7 +90,7 @@ The three high findings:
 Two results are about the project's own assurances and matter as much as
 the defects:
 
-- **The test suite missed 9 of 16 deliberate breakages of the lockdown**,
+- **The test suite missed 8 of 13 deliberate breakages of the lockdown**,
   among them `/sys` writable for root, truncation of program files, and
   removal of files from program directories. A regression there would have
   shipped with a green suite.
