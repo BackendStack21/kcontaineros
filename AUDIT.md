@@ -76,7 +76,7 @@ directory writable; the README overstated what root is kept from reading.
 
 Two findings were about the project's own assurances:
 
-- **The test suite missed 9 of 16 deliberate breakages of the lockdown**,
+- **The test suite missed 8 of 13 deliberate breakages of the lockdown**,
   for instance `/sys` writable for root, and files removable from program
   directories. It now calls every system call on the filter's list, and
   attacks program directories by truncation, removal and linking, each
